@@ -39,6 +39,9 @@ assert(source.includes('/idea/start'), 'The idea workflow must expose an agent-g
 assert(source.includes('New session'), 'Starting the idea workflow must open the New session dialog');
 assert(source.includes('Connect a thinking agent'), 'The first idea workspace state must ask the user to connect an agent');
 assert(source.includes('Start thinking'), 'The connected idea workspace must expose the Start thinking action');
+assert(source.includes("onclick=\"openIdeaStage('+jsArg(step.panel)+')\""), 'Idea stage actions must encode dynamic inline-handler arguments safely');
+assert(!source.includes("openIdeaStage('+JSON.stringify(step.panel)+')"), 'Idea stage actions must not emit nested quotes that break the Start button');
+assert(source.includes("panel==='agent'&&!state.ideaWorkflow.messages.length"), 'Brainstorm Start must always open the New session dialog before thinking begins');
 assert(source.includes('PLAN.MD ONLY:'), 'Goldfish must receive only the generated plan.md');
 assert(source.includes("kind='design_draft' ORDER BY version DESC LIMIT 1"), 'Goldfish and resolution must select the latest plan.md specifically');
 assert(!source.includes('Not started'), 'The implemented idea stages must not display a decorative Not started label');
