@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS repository_connections (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
-  provider TEXT NOT NULL CHECK(provider = 'github'),
+  provider TEXT NOT NULL CHECK(provider IN ('github', 'bitbucket')),
   owner TEXT NOT NULL,
   repository TEXT NOT NULL,
   repository_id TEXT NOT NULL,
