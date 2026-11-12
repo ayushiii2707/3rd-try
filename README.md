@@ -8,7 +8,13 @@ Set `CREDENTIAL_ENCRYPTION_KEY` in the hosted Site runtime environment to a base
 
 The worker validates GitHub with `GET https://api.github.com/repos/{owner}/{repository}` and Bitbucket with `GET https://api.bitbucket.org/2.0/repositories/{workspace}/{repository}` over HTTPS before creating a connection. It then verifies branch access using the selected provider's official API. Successful responses prove access to that exact repository, including private repositories when the submitted credential permits it. Provider failures are mapped to safe, user-actionable messages. Live success-path verification still needs user-provided valid credentials.
 
-`migrations/0001_project_connections.sql` documents the production schema. The worker performs an idempotent bootstrap for the initial deployment because this minimal Worker starter has no migration runner; move this migration into the platform migration runner before subsequent schema changes.
+The numbered files under `migrations/` document the production schema, including the persisted idea conversation, versioned artifacts, isolated review rounds, and finding resolutions in `0005_idea_workflow.sql`. The worker also performs an idempotent bootstrap because this minimal Worker starter has no migration runner; apply the numbered migrations in order when using a platform migration runner.
+
+## Idea workflow AI
+
+The “I’m starting from an idea” workspace implements only five stages: brainstorm, draft, independent review, resolution, and iterative convergence. Configure the server-side `AI_API_KEY` secret (or `OPENAI_API_KEY`). Optional `AI_BASE_URL` and `AI_MODEL` values select an OpenAI-compatible endpoint and model; the defaults are `https://api.openai.com/v1` and `gpt-4.1-mini`. The key is read only by the Worker and is never sent to the browser or stored in D1.
+
+Brainstorm messages, concept briefs, design drafts, review rounds, and finding decisions are persisted in D1. Five isolated review calls examine only the current artifact through Scope, Comprehension, Design, Feasibility, and Readiness lenses. The loop converges after two consecutive clean rounds and stops after five rounds.
 
 Use this starter for a static microsite, click counter, or simple internal UI whose state is browser-scoped. It has no dependencies and needs no install.
 

@@ -24,7 +24,15 @@ assert(source.includes("provider:'github'"), 'GitHub adapter is required');
 assert(source.includes("provider:'bitbucket'"), 'Bitbucket adapter is required');
 assert(source.includes("https://api.github.com"), 'GitHub must use the official API');
 assert(source.includes("https://api.bitbucket.org/2.0"), 'Bitbucket must use the official API');
+assert(source.includes("const reviewLenses=[['Scope'"), 'Idea review must define isolated Scope, Comprehension, Design, Feasibility, and Readiness lenses');
+assert(source.includes("Promise.allSettled(reviewLenses.map"), 'Idea reviewers must run as independent model calls');
+assert(source.includes("cleanRounds>=2?'converged':'complete'"), 'Idea convergence must require two consecutive clean review rounds');
+assert(source.includes("if(round>5)"), 'Idea review must stop after five rounds');
+assert(source.includes("status=['open','accepted','contested','escalated','declined','fixed']"), 'Idea findings must support explicit human resolution states');
+assert(source.includes("function sendIdeaMessage(event)"), 'The idea workspace must expose persistent brainstorming');
+assert(source.includes("function generateIdeaArtifact(kind)"), 'The idea workspace must generate versioned drafts');
+assert(source.includes("function applyIdeaResolutions()"), 'Accepted review findings must be applicable to a new draft version');
 const safeConnection = source.match(/function safeConnection\(row\)\{([^}]]+)\}/)?.[1] || '';
 assert(!safeConnection.includes('encrypted_pat') && !safeConnection.includes('credential_iv'), 'Safe connection responses must not expose stored credentials');
 
-console.log('Workflow audit passed: navigation, sidebar collapse, UI labels/options, provider adapters, and credential safeguards are present.');
+console.log('Workflow audit passed: onboarding, providers, credential safeguards, and the five-stage idea workflow are present.');
