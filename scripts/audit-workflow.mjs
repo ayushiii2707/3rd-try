@@ -32,6 +32,16 @@ assert(source.includes("status=['open','accepted','contested','escalated','decli
 assert(source.includes("function sendIdeaMessage(event)"), 'The idea workspace must expose persistent brainstorming');
 assert(source.includes("function generateIdeaArtifact(kind)"), 'The idea workspace must generate versioned drafts');
 assert(source.includes("function applyIdeaResolutions()"), 'Accepted review findings must be applicable to a new draft version');
+assert(source.includes('CREATE TABLE IF NOT EXISTS idea_agent_connections'), 'Idea sessions must persist their verified external agent connection');
+assert(source.includes('CREATE TABLE IF NOT EXISTS idea_memory'), 'Elephant memory must persist on the backend');
+assert(source.includes('/idea/agent'), 'The idea workflow must expose a real server-side agent verification endpoint');
+assert(source.includes('/idea/start'), 'The idea workflow must expose an agent-gated thinking endpoint');
+assert(source.includes('New session'), 'Starting the idea workflow must open the New session dialog');
+assert(source.includes('Connect a thinking agent'), 'The first idea workspace state must ask the user to connect an agent');
+assert(source.includes('Start thinking'), 'The connected idea workspace must expose the Start thinking action');
+assert(source.includes('PLAN.MD ONLY:'), 'Goldfish must receive only the generated plan.md');
+assert(source.includes("kind='design_draft' ORDER BY version DESC LIMIT 1"), 'Goldfish and resolution must select the latest plan.md specifically');
+assert(!source.includes('Not started'), 'The implemented idea stages must not display a decorative Not started label');
 const safeConnection = source.match(/function safeConnection\(row\)\{([^}]]+)\}/)?.[1] || '';
 assert(!safeConnection.includes('encrypted_pat') && !safeConnection.includes('credential_iv'), 'Safe connection responses must not expose stored credentials');
 
