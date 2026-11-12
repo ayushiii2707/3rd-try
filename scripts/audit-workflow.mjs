@@ -6,8 +6,9 @@ const source = await readFile(new URL('../worker/index.js', import.meta.url), 'u
 assert.equal((source.match(/>Check and add<\/button>/g) || []).length, 2, 'Both provider forms must use the exact Check and add label');
 assert(!source.includes('＋ Check'), 'The provider action must not have a decorative leading plus');
 assert(source.includes('>Select an option</option>'), 'Products must use the requested placeholder');
-assert(source.includes("services=['Web','Mobile','API','Database']"), 'Products must expose exactly four supported choices');
-assert(!source.includes("['Web','Mobile','API','Service','Database'].map"), 'Service must not be duplicated in the Products dropdown');
+assert(source.includes("services=['Web','Mobile','API','Database','Service']"), 'Products must expose Web, Mobile, API, Database, and Service exactly once');
+assert(source.includes("function dashboardSidebar(active='Home')"), 'The project dashboard must use the reduced project sidebar');
+assert(source.includes("onclick=\"showWorkspace()\">↔ SWITCH PROJECT"), 'Switch Project must open the workspace project list');
 assert(!source.includes('<h3 style="margin-top:18px">I have requirements</h3>'), 'The requirements-only starting card must remain removed');
 assert(!source.includes('<h3 style="margin-top:18px">I have requirements and code</h3>'), 'The combined starting card must remain removed');
 assert(source.includes("crypto.subtle.encrypt({name:'AES-GCM'"), 'Credentials must use authenticated AES-GCM encryption');
