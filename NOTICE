@@ -1,0 +1,12 @@
+ADIS Project Hub
+
+The idea workflow implements the Elephant–Goldfish Model described in
+https://github.com/google/elephant-goldfish-model
+Copyright Google LLC, licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+
+The workflow structure, reviewer roles, review stage order, finding format,
+resolution categories, and convergence rules in worker/egm-personas.js and
+worker/egm.js are adapted from that project (reviewed at commit
+964a4f1ecd333961375c35cb37ed09364dab5e4e). The prompt text in this
+repository was written for this application.

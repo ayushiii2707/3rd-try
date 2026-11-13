@@ -304,9 +304,10 @@ test("API errors are classified honestly", async () => {
     const projectId = await createProject(call, "ERRORS");
     const duplicate = await call("/api/projects", { method: "POST", body: { name: "Again", code: "ERRORS" } });
     assert.equal(duplicate.status, 409);
-    const unsupported = await call(`/api/projects/${projectId}/idea/executions`, { method: "POST", body: { operation: "design_draft" } });
-    assert.equal(unsupported.status, 400);
-    assert.match(unsupported.body.error, /concept_brief/);
+    const readOnly = await call(`/api/projects/${projectId}/idea/executions`, { method: "POST", body: { operation: "draft_section" } });
+    assert.equal(readOnly.status, 405, "execution records are read-only; model calls run only through workflow steps");
+    const unknownDecision = await call(`/api/projects/${projectId}/idea/findings/missing`, { method: "PATCH", body: { decision: "accept" } });
+    assert.equal(unknownDecision.status, 404);
   });
 });
 
@@ -325,68 +326,5 @@ test("a failed Elephant reply leaves no orphan message, and the agent label matc
     const roles = sqlite.prepare("SELECT role FROM idea_messages WHERE project_id = ? ORDER BY created_at").all(projectId).map((row) => row.role);
     sqlite.close();
     assert.deepEqual(roles, ["assistant"]);
-  });
-});
-
-test("Goldfish review rounds count per review loop and failed rounds are not counted", async () => {
-  await withBackend(async ({ call, mock, databasePath }) => {
-    const projectId = await createProject(call, "REVIEW");
-    const insertPlan = (version, parentId = null) => {
-      const sqlite = new DatabaseSync(databasePath);
-      const id = `plan-${version}`;
-      const at = new Date(Date.now() + version).toISOString();
-      sqlite.prepare("INSERT INTO idea_artifacts (id, project_id, kind, version, status, title, content, parent_artifact_id, created_at, updated_at) VALUES (?, ?, 'design_draft', ?, 'draft', 'plan.md', ?, ?, ?, ?)")
-        .run(id, projectId, version, `# Plan ${version}`, parentId, at, at);
-      sqlite.close();
-      return id;
-    };
-    insertPlan(1);
-
-    mock.aiStatus = 500;
-    assert.equal((await call(`/api/projects/${projectId}/idea/review`, { method: "POST" })).status, 503);
-    mock.aiStatus = 200;
-    const first = await call(`/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(first.status, 201, first.text);
-    assert.equal(first.body.run.round, 1, "a failed attempt does not consume a round");
-    const second = await call(`/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(second.body.run.round, 2);
-    assert.equal(second.body.run.status, "converged");
-
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    insertPlan(2);
-    const fresh = await call(`/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(fresh.body.run.round, 1, "a freshly generated plan.md starts a new review loop");
-    assert.equal(fresh.body.run.clean_rounds, 1);
-
-    const sqlite = new DatabaseSync(databasePath, { readOnly: true });
-    const statuses = sqlite.prepare("SELECT status FROM idea_review_runs WHERE project_id = ? ORDER BY created_at").all(projectId).map((row) => row.status);
-    sqlite.close();
-    assert.deepEqual(statuses, ["failed", "complete", "converged", "complete"]);
-  });
-});
-
-test("resolution links the revised plan to its parent and fixes findings atomically", async () => {
-  await withBackend(async ({ call, mock, databasePath }) => {
-    const projectId = await createProject(call, "RESOLVE");
-    const sqlite = new DatabaseSync(databasePath);
-    const at = new Date().toISOString();
-    sqlite.prepare("INSERT INTO idea_artifacts (id, project_id, kind, version, status, title, content, created_at, updated_at) VALUES ('plan-1', ?, 'design_draft', 1, 'draft', 'plan.md', '# Plan', ?, ?)").run(projectId, at, at);
-    sqlite.close();
-    mock.aiContent = JSON.stringify({ summary: "Gap.", findings: [{ severity: "Major", title: "Add tests", detail: "No acceptance tests.", recommendation: "Add them." }] });
-    const review = await call(`/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(review.status, 201, review.text);
-    const findingId = review.body.findings[0].id;
-    assert.equal((await call(`/api/projects/${projectId}/idea/findings/${findingId}`, { method: "PATCH", body: { status: "accepted" } })).status, 200);
-
-    mock.aiContent = "# Plan\n\n## Testing\nAcceptance tests added.";
-    const resolved = await call(`/api/projects/${projectId}/idea/resolve`, { method: "POST" });
-    assert.equal(resolved.status, 201, resolved.text);
-    assert.equal(resolved.body.artifact.parent_artifact_id, "plan-1");
-    assert.equal(resolved.body.artifact.version, 2);
-    assert.match(resolved.body.artifact.content_sha256, /^[a-f0-9]{64}$/);
-    const db = new DatabaseSync(databasePath, { readOnly: true });
-    assert.equal(db.prepare("SELECT parent_artifact_id FROM idea_artifacts WHERE version = 2 AND project_id = ?").get(projectId).parent_artifact_id, "plan-1");
-    assert.equal(db.prepare("SELECT status FROM idea_findings WHERE id = ?").get(findingId).status, "fixed");
-    db.close();
   });
 });

@@ -61,7 +61,7 @@ class SQLiteStatement {
 // The API handlers use a small prepare/bind/first/all/run/batch interface.
 // This class implements it directly on node:sqlite so the handlers run
 // unchanged against the local SQLite file.
-export class SQLiteDatabaseAdapter {
+class SQLiteDatabaseAdapter {
   constructor(database) {
     this.database = database;
   }
@@ -93,7 +93,7 @@ function tableExists(database, name) {
   return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
 }
 
-export async function migrateLocalDatabase(database) {
+async function migrateLocalDatabase(database) {
   // Databases created by earlier builds tracked migrations in a differently
   // named table. Rename it in place so history is kept and nothing reapplies.
   if (tableExists(database, LEGACY_MIGRATIONS_TABLE) && !tableExists(database, MIGRATIONS_TABLE)) {
@@ -141,7 +141,7 @@ function hasEncryptedCredentials(database) {
 // Order: CREDENTIAL_ENCRYPTION_KEY env var, then the key file stored next to
 // the database. A new key file is created only for a database that holds no
 // encrypted credentials yet, so existing ciphertext can never be orphaned.
-export async function resolveCredentialKey({ envValue, keyPath, database }) {
+async function resolveCredentialKey({ envValue, keyPath, database }) {
   const fromEnv = typeof envValue === "string" ? envValue.trim() : "";
   if (fromEnv) {
     if (!isValidKey(fromEnv)) throw new Error("CREDENTIAL_ENCRYPTION_KEY must be a valid base64-encoded 32-byte key.");

@@ -6,6 +6,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import worker from "../worker/index.js";
+import { enqueueIdeaExecution, sha256 } from "../worker/idea-execution.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const migrationNames = [
@@ -16,6 +17,7 @@ const migrationNames = [
   "0005_idea_workflow.sql",
   "0006_idea_agent_memory.sql",
   "0007_idea_execution_foundation.sql",
+  "0008_egm_workflow.sql",
 ];
 
 class SQLiteStatement {
@@ -78,235 +80,19 @@ function request(env, path, { method = "GET", user = "user-1", body } = {}) {
   }), env);
 }
 
-const validConceptBrief = `# Working hypothesis
-Build a reliable planning pipeline.
-
-# Problem
-Planning state is fragmented and difficult to resume.
-
-# Target users
-Product and engineering teams.
-
-# Desired outcomes
-A durable, reviewable plan.
-
-# In scope
-Concept brief generation and persistence.
-
-# Out of scope
-Ordered Goldfish review.
-
-# Constraints
-Use the existing server and SQLite database.
-
-# Assumptions
-Use an idempotent execution lifecycle.
-
-# Risks
-The existing session contains enough discovery context.
-
-# Success measures
-Executions resume without duplicated artifacts.
-
-# Open questions
-Which review lenses should run first?`;
-
-function modelResponse(content = validConceptBrief, status = 200) {
-  if (status !== 200) {
-    return new Response(JSON.stringify({ error: { message: "temporary provider failure" } }), {
-      status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
+test("execution records are read-only and scoped to the project owner", async () => {
+  const { sqlite, env } = await database(8);
+  await enqueueIdeaExecution(env.DB, {
+    projectId: "project-1", idempotencyKey: "draft_section:overview:v1", agentRole: "elephant", operation: "draft_section",
+    provider: "openai-compatible", model: "test-model", adapterVersion: "1", promptVersion: "egm-v1", personaVersion: "egm-personas-v1:elephant",
+    inputManifest: [{ kind: "concept_brief" }], inputSha256: await sha256("input"),
   });
-}
-
-test("execution API is project-scoped, idempotent, cancellable, and makes no provider call", async () => {
-  const { sqlite, env } = await database(7);
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => { throw new Error("External model calls are forbidden in foundation tests."); };
-  try {
-    const schemaResponse = await request(env, "/api/projects/project-1/idea/execution-schema");
-    assert.equal(schemaResponse.status, 200);
-    assert.equal((await schemaResponse.json()).schema.ready, true);
-
-    const firstResponse = await request(env, "/api/projects/project-1/idea/executions", {
-      method: "POST",
-      body: { operation: "concept_brief" },
-    });
-    assert.equal(firstResponse.status, 201);
-    const first = await firstResponse.json();
-    assert.equal(first.created, true);
-    assert.equal(first.execution.status, "queued");
-
-    const repeatedResponse = await request(env, "/api/projects/project-1/idea/executions", {
-      method: "POST",
-      body: { operation: "concept_brief" },
-    });
-    assert.equal(repeatedResponse.status, 200);
-    const repeated = await repeatedResponse.json();
-    assert.equal(repeated.created, false);
-    assert.equal(repeated.execution.id, first.execution.id);
-
-    const listResponse = await request(env, "/api/projects/project-1/idea/executions?limit=10");
-    assert.equal(listResponse.status, 200);
-    assert.equal((await listResponse.json()).executions.length, 1);
-
-    const cancelResponse = await request(env, `/api/projects/project-1/idea/executions/${first.execution.id}/cancel`, { method: "POST" });
-    assert.equal(cancelResponse.status, 200);
-    assert.equal((await cancelResponse.json()).execution.status, "cancelled");
-
-    const unauthorized = await request(env, "/api/projects/project-1/idea/executions", { user: "user-2" });
-    assert.equal(unauthorized.status, 404);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_executions").get().count, 1);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("execution API reports the pre-0007 schema and refuses to enqueue", async () => {
-  const { env } = await database(6);
-  const schemaResponse = await request(env, "/api/projects/project-1/idea/execution-schema");
-  assert.equal(schemaResponse.status, 200);
-  const schema = (await schemaResponse.json()).schema;
-  assert.equal(schema.ready, false);
-  assert.ok(schema.missing_tables.includes("idea_executions"));
-
-  const enqueueResponse = await request(env, "/api/projects/project-1/idea/executions", {
-    method: "POST",
-    body: { operation: "concept_brief" },
-  });
-  assert.equal(enqueueResponse.status, 503);
-  assert.equal((await enqueueResponse.json()).code, "IDEA_EXECUTION_SCHEMA_NOT_READY");
-});
-
-test("Elephant concept brief runs through the existing artifact route and is idempotently reused", async () => {
-  const { sqlite, env } = await database(7);
-  env.AI_API_KEY = "mock-key";
-  env.AI_BASE_URL = "https://mock.invalid/v1";
-  const originalFetch = globalThis.fetch;
-  let providerCalls = 0;
-  globalThis.fetch = async () => {
-    providerCalls += 1;
-    return modelResponse();
-  };
-  try {
-    const firstResponse = await request(env, "/api/projects/project-1/idea/artifacts", {
-      method: "POST",
-      body: { kind: "concept_brief" },
-    });
-    assert.equal(firstResponse.status, 201);
-    const first = await firstResponse.json();
-    assert.equal(first.execution.status, "succeeded");
-    assert.equal(first.artifact.kind, "concept_brief");
-    assert.equal(first.artifact.prompt_version, "concept_brief-v1");
-    assert.match(first.artifact.content_sha256, /^[a-f0-9]{64}$/);
-    const provenance = JSON.parse(first.artifact.source_manifest_json);
-    assert.ok(provenance.some((entry) => entry.kind === "idea_session"));
-    assert.ok(provenance.some((entry) => entry.kind === "idea_message"));
-    assert.ok(provenance.some((entry) => entry.kind === "idea_memory"));
-
-    const attempt = sqlite.prepare("SELECT * FROM idea_execution_attempts WHERE execution_id = ?").get(first.execution.id);
-    assert.equal(attempt.status, "succeeded");
-    assert.equal(attempt.output_sha256, first.artifact.content_sha256);
-    const session = sqlite.prepare("SELECT workflow_state, state_version FROM idea_sessions WHERE project_id = ?").get("project-1");
-    assert.deepEqual({ ...session }, { workflow_state: "concept_brief_ready", state_version: 1 });
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_workflow_events WHERE event_type = 'concept_brief_persisted'").get().count, 1);
-
-    const repeatedResponse = await request(env, "/api/projects/project-1/idea/artifacts", {
-      method: "POST",
-      body: { kind: "concept_brief" },
-    });
-    assert.equal(repeatedResponse.status, 200);
-    const repeated = await repeatedResponse.json();
-    assert.equal(repeated.execution.id, first.execution.id);
-    assert.equal(repeated.artifact.id, first.artifact.id);
-    assert.equal(providerCalls, 1);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_executions").get().count, 1);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_artifacts WHERE kind = 'concept_brief'").get().count, 1);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("Elephant concept brief retries a provider failure and resumes the same execution", async () => {
-  const { sqlite, env } = await database(7);
-  env.AI_API_KEY = "mock-key";
-  env.AI_BASE_URL = "https://mock.invalid/v1";
-  const originalFetch = globalThis.fetch;
-  let providerCalls = 0;
-  globalThis.fetch = async () => {
-    providerCalls += 1;
-    return providerCalls === 1 ? modelResponse("", 500) : modelResponse();
-  };
-  try {
-    const failedResponse = await request(env, "/api/projects/project-1/idea/artifacts", {
-      method: "POST",
-      body: { kind: "concept_brief" },
-    });
-    assert.equal(failedResponse.status, 503);
-    const failed = await failedResponse.json();
-    assert.equal(failed.code, "PROVIDER_ERROR");
-    assert.equal(failed.retryable, true);
-    const queued = sqlite.prepare("SELECT * FROM idea_executions").get();
-    assert.equal(queued.status, "queued");
-    assert.equal(queued.attempt_count, 1);
-    assert.equal(sqlite.prepare("SELECT status FROM idea_execution_attempts WHERE execution_id = ? AND attempt_no = 1").get(queued.id).status, "failed");
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_artifacts").get().count, 0);
-
-    const resumedResponse = await request(env, "/api/projects/project-1/idea/artifacts", {
-      method: "POST",
-      body: { kind: "concept_brief" },
-    });
-    assert.equal(resumedResponse.status, 200);
-    const resumed = await resumedResponse.json();
-    assert.equal(resumed.execution.id, queued.id);
-    assert.equal(resumed.execution.status, "succeeded");
-    assert.equal(resumed.execution.attempt_count, 2);
-    assert.equal(providerCalls, 2);
-    assert.deepEqual(
-      sqlite.prepare("SELECT attempt_no, status FROM idea_execution_attempts WHERE execution_id = ? ORDER BY attempt_no").all(queued.id).map((row) => ({ ...row })),
-      [{ attempt_no: 1, status: "failed" }, { attempt_no: 2, status: "succeeded" }],
-    );
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_artifacts WHERE kind = 'concept_brief'").get().count, 1);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("Elephant processor rejects changed discovery input before calling the provider", async () => {
-  const { sqlite, env } = await database(7);
-  env.AI_API_KEY = "mock-key";
-  env.AI_BASE_URL = "https://mock.invalid/v1";
-  const originalFetch = globalThis.fetch;
-  let providerCalls = 0;
-  globalThis.fetch = async () => {
-    providerCalls += 1;
-    return modelResponse();
-  };
-  try {
-    const enqueueResponse = await request(env, "/api/projects/project-1/idea/executions", {
-      method: "POST",
-      body: { operation: "concept_brief" },
-    });
-    assert.equal(enqueueResponse.status, 201);
-    const queued = (await enqueueResponse.json()).execution;
-    sqlite.prepare("INSERT INTO idea_messages (id, project_id, role, content, hypothesis, ready, created_at) VALUES (?, ?, ?, ?, '', 0, ?)")
-      .run("message-2", "project-1", "user", "The discovery input changed.", "2026-11-13T00:01:00.000Z");
-
-    const processResponse = await request(env, `/api/projects/project-1/idea/executions/${queued.id}/process`, { method: "POST" });
-    assert.equal(processResponse.status, 409);
-    const failure = await processResponse.json();
-    assert.equal(failure.code, "INPUT_CHANGED");
-    assert.equal(failure.retryable, false);
-    assert.equal(providerCalls, 0);
-    const execution = sqlite.prepare("SELECT status, attempt_count, error_code FROM idea_executions WHERE id = ?").get(queued.id);
-    assert.deepEqual({ ...execution }, { status: "failed", attempt_count: 1, error_code: "INPUT_CHANGED" });
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_artifacts").get().count, 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  const listed = await request(env, "/api/projects/project-1/idea/executions");
+  assert.equal(listed.status, 200);
+  const body = await listed.json();
+  assert.equal(body.executions.length, 1);
+  assert.equal(body.executions[0].operation, "draft_section");
+  assert.equal((await request(env, "/api/projects/project-1/idea/executions", { user: "user-2" })).status, 404);
+  assert.equal((await request(env, "/api/projects/project-1/idea/executions", { method: "POST", body: { operation: "draft_section" } })).status, 405);
+  sqlite.close();
 });

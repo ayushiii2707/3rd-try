@@ -6,7 +6,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import {
-  cancelIdeaExecution,
+  canonicalJson,
   claimIdeaExecution,
   enqueueIdeaExecution,
   finishIdeaExecution,
@@ -81,7 +81,7 @@ async function executionInput(overrides = {}) {
     projectId: "project-1",
     idempotencyKey: "draft:artifact-1:v1",
     agentRole: "elephant",
-    operation: "design_draft",
+    operation: "draft_section",
     provider: "openai-compatible",
     model: "test-model",
     adapterVersion: "1",
@@ -210,33 +210,10 @@ test("completion requires the active lease and failed attempts retry safely", as
   assert.equal(failed.execution.error_message.includes("secret-value"), false);
 });
 
-test("queued executions cancel immediately while running executions request cooperative cancellation", async () => {
-  const { sqlite, db } = await database();
-  seedProject(sqlite);
-  const queued = await enqueueIdeaExecution(db, await executionInput());
-  const cancelled = await cancelIdeaExecution(db, {
-    projectId: "project-1",
-    executionId: queued.execution.id,
-    actorId: "user-1",
-    now: "2026-11-13T00:02:00.000Z",
-  });
-  assert.equal(cancelled.changed, true);
-  assert.equal(cancelled.execution.status, "cancelled");
-
-  const runningSeed = await enqueueIdeaExecution(db, await executionInput({ idempotencyKey: "draft:artifact-1:v2" }));
-  await claimIdeaExecution(db, {
-    executionId: runningSeed.execution.id,
-    workerId: "worker-a",
-    now: "2026-11-13T00:03:00.000Z",
-  });
-  const requested = await cancelIdeaExecution(db, {
-    projectId: "project-1",
-    executionId: runningSeed.execution.id,
-    actorId: "user-1",
-    now: "2026-11-13T00:03:05.000Z",
-  });
-  assert.equal(requested.changed, true);
-  assert.equal(requested.execution.status, "cancel_requested");
+test("canonical JSON omits undefined values and stays parseable", () => {
+  const text = canonicalJson({ b: 1, a: undefined, c: [{ d: undefined, e: "x" }] });
+  assert.equal(text, "{\"b\":1,\"c\":[{\"e\":\"x\"}]}");
+  assert.deepEqual(JSON.parse(text), { b: 1, c: [{ e: "x" }] });
 });
 
 test("diagnostic redaction removes common secret formats", () => {

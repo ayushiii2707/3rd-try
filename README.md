@@ -55,6 +55,7 @@ Copy `.env.example` to `.env` (git-ignored) or export variables in your shell:
 | `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint. |
 | `AI_MODEL` | `gpt-4.1-mini` | Model name. |
 | `AI_PROVIDER` | `OpenAI-compatible` | Provider label shown in the idea workspace and execution records. |
+| `AI_MAX_CONCURRENCY` | `4` | Maximum simultaneous model requests. Set `1` for accounts with small per-minute token limits (for example free tiers); rate-limited requests wait for the provider's Retry-After and are retried. |
 | `ADIS_USER_NAME` / `ADIS_USER_ROLE` | `Local user` / `Owner` | Name and role shown in the app. |
 | `ADIS_WORKSPACE_NAME` | `My workspace` | Workspace title on the project list. |
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Listen address. |
@@ -89,9 +90,15 @@ Repository scanning is not implemented yet; the dashboard shows it as unavailabl
 
 ## Elephant–Goldfish workflow
 
-The idea workflow does not require or create a repository connection. Brainstorm messages and Elephant memory are persisted in SQLite; a user message is stored together with Elephant's reply, so a failed model call leaves no half-finished exchange. Elephant creates a concept brief (through the durable execution lifecycle) and a `plan.md`; Goldfish reviewers receive only that plan. Each review round and its findings are written atomically, failed rounds are recorded but not counted, and the round limit (five) applies per review loop, which restarts when a new `plan.md` is generated. Accepted findings are applied by Elephant into a new plan version linked to its parent. Convergence requires two consecutive clean review rounds.
+"I'm starting from an idea" implements the [Elephant–Goldfish Model](https://github.com/google/elephant-goldfish-model) (Apache-2.0; see `NOTICE`): **design with an Elephant, review with a Goldfish.** Elephant is the persistent planner that remembers the discovery conversation. Goldfish reviewers start fresh and see only the document under review. The workflow needs no repository connection.
 
-Current status: only concept-brief generation runs through the durable queue/claim/retry lifecycle, and only that operation can be queued through the executions API. The ordered six-stage Goldfish review, formal approval gates, and context-isolation proof are still being implemented — see `CODEX_HANDOFF_CONTEXT.md`.
+1. **Brainstorm.** Elephant asks one focused question at a time and keeps a structured memory. When you choose *Review with Goldfishes*, Elephant writes an anchored hypothesis and seven fresh lenses stress-test it in parallel (Contrarian/YAGNI; Cost, Quota & Token Economics; UX & Developer Ergonomics; Migration & Backward Compatibility; Observability & SRE Debuggability; Long-Term Tech Debt; Inventive Catalyst). A synthesizer writes `concepts_brief.md` and lists the strongest objections.
+2. **Draft.** Elephant writes the design doc from the brief one section at a time (Overview and user journeys → Technical Plan → Alternatives → Detailed Implementation Plan); you approve each section, with optional feedback. Choices with several defensible answers are presented as options for you to decide. Finalizing checks the draft against the brief and shows any contradictions before the doc is saved.
+3. **Independent review.** Five ordered stages, each run by new reviewers: Zoom Out (+ Inventive Catalyst) → Comprehension (the document alone) → Design Critique (design, structure, style) → Intermediate Zoom Out → Implementation Readiness. Findings are rated Blocker, Major, or Nit, merged, given stable ids, and written to a Goldfish Review Report.
+4. **Resolution.** Elephant proposes one category per finding — propose fix, contest (with evidence the reviewer could read), escalate (needs a fact only you have), or decline — and you decide. A comprehension gap cannot be contested. Every Blocker and Major needs a decision before Elephant applies the accepted changes into a new design doc version linked to its parent.
+5. **Iterative convergence.** A round is clean when every reviewer ran and no unsettled Blocker or Major remains. Two consecutive clean rounds converge; after five rounds (or when fixes keep reopening issues) you choose to accept, continue, or return to drafting. Final approval records the approved document's SHA-256. Settled findings (contested, declined, confirmed) stay settled when re-raised.
+
+**Isolation and durability.** Every Elephant and Goldfish call is a separate, stateless model request recorded as a durable execution (idempotent enqueue, claimed attempt, input hash, output hash). A reviewer is retried once; if it fails again it is recorded as *not run* and the round cannot be clean. A private marker that exists only in Elephant's context is checked against every Goldfish request before it is sent; if it would leak, the reviewer does not run. Completed steps are reused, so a reload or server restart resumes where the workflow stopped. The concepts brief, design doc versions, and review reports download as Markdown.
 
 The model key is server-only and is never stored in SQLite or sent to the browser.
 

@@ -1,11 +1,14 @@
-export const IDEA_REVIEW_STAGES = Object.freeze([
+// The five ordered Goldfish review stages (see egm-personas.js).
+const IDEA_REVIEW_STAGES = Object.freeze([
   "zoom_out", "comprehension", "critic", "intermediate_zoom_out",
-  "implementation_readiness", "synthesis",
+  "implementation_readiness",
 ]);
 
-export const IDEA_EXECUTION_OPERATIONS = Object.freeze([
-  "concept_brief", "design_draft", "review_stage", "review_synthesis",
-  "resolve_findings", "convergence_review",
+// Every Elephant and Goldfish model call in the workflow is one of these.
+const IDEA_EXECUTION_OPERATIONS = Object.freeze([
+  "brainstorm_hypothesis", "brainstorm_lens", "brainstorm_synthesis",
+  "draft_section", "draft_reconcile",
+  "review_reviewer", "review_classification", "resolve_findings",
 ]);
 
 const REQUIRED_SCHEMA = Object.freeze({
@@ -50,7 +53,8 @@ const all = async (db, sql, binds = []) => values(await statement(db, sql, binds
 export function canonicalJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  // Like JSON.stringify, omit keys whose value is undefined so the output is valid JSON.
+  return `{${Object.keys(value).sort().filter((key) => value[key] !== undefined).map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
 export async function sha256(value) {
@@ -85,7 +89,7 @@ export async function inspectIdeaExecutionSchema(db) {
   };
 }
 
-export async function assertIdeaExecutionSchema(db) {
+async function assertIdeaExecutionSchema(db) {
   const inventory = await inspectIdeaExecutionSchema(db);
   if (!inventory.ready) throw new IdeaExecutionSchemaError(inventory);
   return inventory;
@@ -167,14 +171,6 @@ export async function listIdeaExecutions(db, projectId, { limit = 50 } = {}) {
   return rows.map(parseJsonColumn);
 }
 
-export async function getIdeaExecution(db, { projectId, executionId }) {
-  await assertIdeaExecutionSchema(db);
-  const row = await first(db, "SELECT * FROM idea_executions WHERE id = ? AND project_id = ?", [
-    requireText(executionId, "executionId"), requireText(projectId, "projectId"),
-  ]);
-  return parseJsonColumn(row);
-}
-
 export async function claimIdeaExecution(db, { executionId, workerId, leaseSeconds = 60, now = new Date() }) {
   await assertIdeaExecutionSchema(db);
   const current = await first(db, "SELECT * FROM idea_executions WHERE id = ?", [requireText(executionId, "executionId")]);
@@ -218,30 +214,6 @@ export async function claimIdeaExecution(db, { executionId, workerId, leaseSecon
     : { claimed: false, reason: "already_claimed", execution: parseJsonColumn(execution) };
 }
 
-export async function cancelIdeaExecution(db, { projectId, executionId, actorId, now = new Date() }) {
-  await assertIdeaExecutionSchema(db);
-  const at = iso(now);
-  const update = statement(db, `UPDATE idea_executions SET
-      status = CASE status WHEN 'queued' THEN 'cancelled' ELSE 'cancel_requested' END,
-      cancel_requested_at = ?, cancelled_at = CASE status WHEN 'queued' THEN ? ELSE cancelled_at END,
-      completed_at = CASE status WHEN 'queued' THEN ? ELSE completed_at END,
-      updated_at = ?
-    WHERE id = ? AND project_id = ? AND status IN ('queued', 'running')`, [
-    at, at, at, at, requireText(executionId, "executionId"), requireText(projectId, "projectId"),
-  ]);
-  const event = statement(db, `INSERT INTO idea_workflow_events (
-      id, project_id, execution_id, event_type, actor_type, actor_id, payload_json,
-      idempotency_key, created_at
-    ) SELECT ?, project_id, id, 'execution_cancel_requested', 'user', ?, '{}', ?, ?
-      FROM idea_executions WHERE id = ? AND project_id = ? AND cancel_requested_at = ?
-    ON CONFLICT(project_id, idempotency_key) DO NOTHING`, [
-    id(), actorId ?? null, `${executionId}:cancel:${at}`, at, executionId, projectId, at,
-  ]);
-  const [result] = await db.batch([update, event]);
-  const execution = await first(db, "SELECT * FROM idea_executions WHERE id = ? AND project_id = ?", [executionId, projectId]);
-  return { changed: changes(result) > 0, execution: parseJsonColumn(execution) };
-}
-
 export async function finishIdeaExecution(db, input) {
   await assertIdeaExecutionSchema(db);
   const at = iso(input.now);
@@ -273,152 +245,4 @@ export async function finishIdeaExecution(db, input) {
   const [, executionResult] = await db.batch([attempt, execution]);
   const row = await first(db, "SELECT * FROM idea_executions WHERE id = ?", [input.executionId]);
   return { adopted: changes(executionResult) > 0, execution: parseJsonColumn(row) };
-}
-
-export async function heartbeatIdeaExecution(db, { executionId, leaseToken, leaseSeconds = 60, now = new Date() }) {
-  await assertIdeaExecutionSchema(db);
-  const at = iso(now);
-  const expiresAt = iso(new Date(new Date(now).getTime() + Math.max(10, leaseSeconds) * 1000));
-  const result = await statement(db, `UPDATE idea_executions SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
-    WHERE id = ? AND lease_token = ? AND status = 'running' AND cancel_requested_at IS NULL`, [
-    at, expiresAt, at, requireText(executionId, "executionId"), requireText(leaseToken, "leaseToken"),
-  ]).run();
-  return { renewed: changes(result) > 0, lease_expires_at: expiresAt };
-}
-
-export async function persistIdeaArtifactExecution(db, input) {
-  await assertIdeaExecutionSchema(db);
-  const projectId = requireText(input.projectId, "projectId");
-  const executionId = requireText(input.executionId, "executionId");
-  const leaseToken = requireText(input.leaseToken, "leaseToken");
-  const kind = requireText(input.kind, "kind", 50);
-  const operation = requireText(input.operation, "operation", 50);
-  if (![["design_draft", "design_draft"], ["resolve_findings", "design_draft"]]
-    .some(([expectedOperation, expectedKind]) => operation === expectedOperation && kind === expectedKind)) {
-    throw new IdeaValidationError("Unsupported durable artifact operation.");
-  }
-  const content = requireText(input.content, "content", 200000);
-  const title = requireText(input.title, "title", 300);
-  const outputSha256 = requireSha256(input.outputSha256, "outputSha256");
-  const promptVersion = requireText(input.promptVersion, "promptVersion", 100);
-  const at = iso(input.now);
-  const existing = await first(db, `SELECT a.* FROM idea_executions e JOIN idea_artifacts a ON a.id=e.resulting_artifact_id
-    WHERE e.id=? AND e.project_id=? AND e.status='succeeded'`, [executionId, projectId]);
-  if (existing) return { adopted: false, artifact: existing, execution: await getIdeaExecution(db, { projectId, executionId }) };
-  const versionRow = await first(db, "SELECT MAX(version) AS version FROM idea_artifacts WHERE project_id=? AND kind=?", [projectId, kind]);
-  const version = Number(versionRow?.version || 0) + 1;
-  const artifactId = input.artifactId || id();
-  const usageJson = input.usage === undefined ? null : canonicalJson(input.usage);
-  const resultJson = canonicalJson({ artifact_id: artifactId, kind, version });
-  const manifest = canonicalJson(Array.isArray(input.sourceManifest) ? input.sourceManifest : []);
-  const statements = [
-    statement(db, `INSERT INTO idea_artifacts (id,project_id,kind,version,status,title,content,created_at,updated_at,parent_artifact_id,content_sha256,prompt_version,source_manifest_json,row_version)
-      SELECT ?,project_id,?,?,'draft',?,?,?,?,?,?,?, ?,0 FROM idea_executions
-      WHERE id=? AND project_id=? AND lease_token=? AND status='running' AND operation=?`, [
-      artifactId, kind, version, title, content, at, at, input.parentArtifactId ?? null, outputSha256, promptVersion, manifest,
-      executionId, projectId, leaseToken, operation,
-    ]),
-    statement(db, `UPDATE idea_execution_attempts SET status='succeeded',output_sha256=?,result_json=?,usage_json=?,completed_at=?
-      WHERE execution_id=? AND attempt_no=? AND status='running'`, [outputSha256, resultJson, usageJson, at, executionId, Number(input.attemptNo)]),
-    statement(db, `UPDATE idea_executions SET status='succeeded',output_sha256=?,usage_json=?,resulting_artifact_id=?,completed_at=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL
-      WHERE id=? AND project_id=? AND lease_token=? AND status='running'`, [outputSha256, usageJson, artifactId, at, at, executionId, projectId, leaseToken]),
-    statement(db, `UPDATE idea_sessions SET workflow_state=?,state_version=state_version+1,updated_at=? WHERE project_id=?`, [operation === "design_draft" ? "draft_ready" : "revision_ready", at, projectId]),
-  ];
-  for (const findingId of input.resolvedFindingIds || []) statements.push(statement(db, `UPDATE idea_findings SET status='fixed',resolution_note=?,resolved_by=?,resolved_at=?,updated_at=?,row_version=row_version+1
-    WHERE id=? AND project_id=? AND status='accepted'`, [input.resolutionNote || "Applied in durable revision.", input.workerId || "system", at, at, findingId, projectId]));
-  statements.push(statement(db, `INSERT INTO idea_workflow_events (id,project_id,execution_id,event_type,actor_type,actor_id,to_state,payload_json,idempotency_key,created_at)
-    VALUES (?,?,?,?, 'system',?,?,?,?,?) ON CONFLICT(project_id,idempotency_key) DO NOTHING`, [id(), projectId, executionId, `${operation}_persisted`, input.workerId ?? null, operation === "design_draft" ? "draft_ready" : "revision_ready", canonicalJson({artifact_id:artifactId,kind,version,content_sha256:outputSha256}), `${executionId}:${operation}_persisted`, at]));
-  const results = await db.batch(statements);
-  const finalExecution = await getIdeaExecution(db, { projectId, executionId });
-  const artifact = finalExecution?.resulting_artifact_id ? await first(db, "SELECT * FROM idea_artifacts WHERE id=?", [finalExecution.resulting_artifact_id]) : null;
-  return { adopted: changes(results[2]) > 0, artifact, execution: finalExecution };
-}
-
-export async function persistIdeaReviewStageExecution(db, input) {
-  await assertIdeaExecutionSchema(db);
-  const stage = requireText(input.stage, "stage");
-  const sequence = IDEA_REVIEW_STAGES.indexOf(stage) + 1;
-  if (!sequence) throw new IdeaValidationError("Unsupported review stage.");
-  const at = iso(input.now);
-  const resultSha = requireSha256(input.outputSha256, "outputSha256");
-  const resultJson = canonicalJson(input.result ?? {});
-  const usageJson = input.usage === undefined ? null : canonicalJson(input.usage);
-  const statements = [
-    statement(db, `INSERT INTO idea_review_stage_results (id,run_id,execution_id,stage,sequence,status,result_json,result_sha256,created_at,updated_at)
-      VALUES (?,?,?,?,?,'succeeded',?,?,?,?) ON CONFLICT(run_id,stage) DO UPDATE SET execution_id=excluded.execution_id,status='succeeded',result_json=excluded.result_json,result_sha256=excluded.result_sha256,updated_at=excluded.updated_at`, [id(), input.runId, input.executionId, stage, sequence, resultJson, resultSha, at, at]),
-    statement(db, `UPDATE idea_execution_attempts SET status='succeeded',output_sha256=?,result_json=?,usage_json=?,completed_at=? WHERE execution_id=? AND attempt_no=? AND status='running'`, [resultSha, resultJson, usageJson, at, input.executionId, Number(input.attemptNo)]),
-    statement(db, `UPDATE idea_executions SET status='succeeded',output_sha256=?,usage_json=?,completed_at=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL WHERE id=? AND project_id=? AND lease_token=? AND status='running'`, [resultSha, usageJson, at, at, input.executionId, input.projectId, input.leaseToken]),
-    statement(db, `UPDATE idea_review_runs SET current_stage=?,updated_at=? WHERE id=? AND project_id=?`, [stage, at, input.runId, input.projectId]),
-    statement(db, `INSERT INTO idea_workflow_events (id,project_id,execution_id,event_type,actor_type,actor_id,payload_json,idempotency_key,created_at) VALUES (?,?,?,'review_stage_succeeded','system',?,?,?,?) ON CONFLICT(project_id,idempotency_key) DO NOTHING`, [id(), input.projectId, input.executionId, input.workerId ?? null, canonicalJson({run_id:input.runId,stage,sequence,result_sha256:resultSha}), `${input.executionId}:stage_succeeded`, at]),
-  ];
-  const results = await db.batch(statements);
-  return { adopted: changes(results[2]) > 0, execution: await getIdeaExecution(db,{projectId:input.projectId,executionId:input.executionId}) };
-}
-
-export async function persistConceptBriefExecution(db, input) {
-  await assertIdeaExecutionSchema(db);
-  const projectId = requireText(input.projectId, "projectId");
-  const executionId = requireText(input.executionId, "executionId");
-  const leaseToken = requireText(input.leaseToken, "leaseToken");
-  const content = requireText(input.content, "content", 200000);
-  const title = requireText(input.title || "Concept brief", "title", 300);
-  const promptVersion = requireText(input.promptVersion, "promptVersion", 100);
-  const outputSha256 = requireSha256(input.outputSha256, "outputSha256");
-  const at = iso(input.now);
-  const existing = await first(db, `SELECT a.* FROM idea_executions e
-    JOIN idea_artifacts a ON a.id = e.resulting_artifact_id
-    WHERE e.id = ? AND e.project_id = ? AND e.status = 'succeeded'`, [executionId, projectId]);
-  if (existing) {
-    return { adopted: false, artifact: existing, execution: await getIdeaExecution(db, { projectId, executionId }) };
-  }
-  const versionRow = await first(db, "SELECT MAX(version) AS version FROM idea_artifacts WHERE project_id = ? AND kind = 'concept_brief'", [projectId]);
-  const version = Number(versionRow?.version || 0) + 1;
-  const artifactId = input.artifactId || id();
-  const sourceManifestJson = canonicalJson(Array.isArray(input.sourceManifest) ? input.sourceManifest : []);
-  const usageJson = input.usage === undefined ? null : canonicalJson(input.usage);
-  const resultJson = canonicalJson({ artifact_id: artifactId, kind: "concept_brief", version });
-  const artifact = statement(db, `INSERT INTO idea_artifacts (
-      id, project_id, kind, version, status, title, content, created_at, updated_at,
-      parent_artifact_id, content_sha256, prompt_version, source_manifest_json, row_version
-    ) SELECT ?, project_id, 'concept_brief', ?, 'draft', ?, ?, ?, ?, NULL, ?, ?, ?, 0
-      FROM idea_executions
-      WHERE id = ? AND project_id = ? AND lease_token = ? AND status = 'running' AND operation = 'concept_brief'`, [
-    artifactId, version, title, content, at, at, outputSha256, promptVersion,
-    sourceManifestJson, executionId, projectId, leaseToken,
-  ]);
-  const attempt = statement(db, `UPDATE idea_execution_attempts SET
-      status = 'succeeded', output_sha256 = ?, result_json = ?, usage_json = ?, completed_at = ?
-    WHERE execution_id = ? AND attempt_no = ? AND status = 'running'
-      AND EXISTS (SELECT 1 FROM idea_executions WHERE id = ? AND project_id = ? AND lease_token = ? AND status = 'running')`, [
-    outputSha256, resultJson, usageJson, at, executionId, Number(input.attemptNo), executionId, projectId, leaseToken,
-  ]);
-  const execution = statement(db, `UPDATE idea_executions SET
-      status = 'succeeded', output_sha256 = ?, usage_json = ?, resulting_artifact_id = ?,
-      completed_at = ?, updated_at = ?, lease_token = NULL, lease_expires_at = NULL,
-      heartbeat_at = NULL, error_code = NULL, error_message = NULL
-    WHERE id = ? AND project_id = ? AND lease_token = ? AND status = 'running' AND operation = 'concept_brief'`, [
-    outputSha256, usageJson, artifactId, at, at, executionId, projectId, leaseToken,
-  ]);
-  const session = statement(db, `UPDATE idea_sessions SET
-      workflow_state = 'concept_brief_ready', state_version = state_version + 1, updated_at = ?
-    WHERE project_id = ? AND EXISTS (
-      SELECT 1 FROM idea_executions WHERE id = ? AND project_id = ? AND status = 'succeeded' AND resulting_artifact_id = ?
-    )`, [at, projectId, executionId, projectId, artifactId]);
-  const event = statement(db, `INSERT INTO idea_workflow_events (
-      id, project_id, execution_id, event_type, actor_type, actor_id,
-      from_state, to_state, payload_json, idempotency_key, created_at
-    ) SELECT ?, project_id, id, 'concept_brief_persisted', 'system', ?,
-      NULL, 'concept_brief_ready', ?, ?, ? FROM idea_executions
-      WHERE id = ? AND project_id = ? AND status = 'succeeded' AND resulting_artifact_id = ?
-    ON CONFLICT(project_id, idempotency_key) DO NOTHING`, [
-    id(), input.workerId ?? null,
-    canonicalJson({ kind: "concept_brief", artifact_id: artifactId, version, content_sha256: outputSha256 }),
-    `${executionId}:concept_brief_persisted`, at, executionId, projectId, artifactId,
-  ]);
-  const [, , executionResult] = await db.batch([artifact, attempt, execution, session, event]);
-  const finalExecution = await getIdeaExecution(db, { projectId, executionId });
-  const finalArtifact = finalExecution?.resulting_artifact_id
-    ? await first(db, "SELECT * FROM idea_artifacts WHERE id = ? AND project_id = ?", [finalExecution.resulting_artifact_id, projectId])
-    : null;
-  return { adopted: changes(executionResult) > 0, artifact: finalArtifact, execution: finalExecution };
 }

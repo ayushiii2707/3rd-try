@@ -6,56 +6,10 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import { startLocalBackend } from "../scripts/local-backend.mjs";
+import { createModel } from "./helpers/egm-model.js";
 
 const nativeFetch = globalThis.fetch;
-const conceptBrief = `# Working hypothesis
-The persistent workflow is viable.
-
-# Problem
-Project planning data must survive restarts.
-
-# Target users
-Product teams using ADIS.
-
-# Desired outcomes
-Durable, traceable planning records.
-
-# In scope
-The local server and its existing APIs.
-
-# Out of scope
-Production deployment.
-
-# Constraints
-No paid or live provider calls.
-
-# Assumptions
-SQLite persists every record used here.
-
-# Risks
-Production schema drift still requires read-only inspection.
-
-# Success measures
-All records remain readable after a restart.
-
-# Open questions
-Production binding identity is not available locally.`;
-
-const initialPlan = `# PLAN_VERSION_ONE
-
-## Goal
-Persist the complete idea workflow.
-
-## Acceptance criteria
-The API stores every generated artifact.`;
-
-const revisedPlan = `# PLAN_VERSION_TWO
-
-## Goal
-Persist the complete idea workflow.
-
-## Acceptance criteria
-The API stores every generated artifact and proves that records survive a backend restart.`;
+const aiModel = createModel();
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -101,44 +55,7 @@ async function externalMock(input, init = {}) {
       is_private: true,
     });
   }
-  if (url.hostname === "mock-ai.invalid") {
-    const body = JSON.parse(await request.text());
-    const prompt = body.messages.map((message) => message.content).join("\n");
-    let content = conceptBrief;
-    if (prompt.includes('Return {"ok":true}')) content = JSON.stringify({ ok: true });
-    else if (prompt.includes("Begin a Socratic discovery")) content = JSON.stringify({
-      reply: "Who experiences this problem most often?",
-      hypothesis: "The workflow needs durable planning memory.",
-      ready: false,
-      memory: { known_facts: ["Persistence is required"], assumptions: [], constraints: [], decisions: [], open_questions: ["Primary user?"] },
-    });
-    else if (prompt.includes("Ask one concise")) content = JSON.stringify({
-      reply: "The concept is ready for a brief.",
-      hypothesis: "A persistent server lifecycle addresses the need.",
-      ready: true,
-      memory: { known_facts: ["Product teams are primary users"], assumptions: [], constraints: ["No production changes"], decisions: ["Use the existing server"], open_questions: [] },
-    });
-    else if (prompt.includes("Create the complete plan.md")) content = initialPlan;
-    else if (prompt.includes("PLAN.MD ONLY:")) {
-      const systemPrompt = body.messages.find((message) => message.role === "system")?.content || "";
-      const shouldFindGap = prompt.includes("PLAN_VERSION_ONE") && systemPrompt.includes("independent Scope reviewer");
-      content = JSON.stringify(shouldFindGap ? {
-        summary: "Scope gap found.",
-        findings: [{
-          severity: "Major",
-          title: "Clarify persistence boundary",
-          detail: "The plan does not state the restart acceptance check.",
-          recommendation: "Add an explicit restart persistence criterion.",
-        }],
-      } : { summary: "No findings.", findings: [] });
-    }
-    else if (prompt.includes("ACCEPTED GOLDFISH FINDINGS")) content = revisedPlan;
-    return jsonResponse({
-      id: "mock-model-request",
-      choices: [{ message: { content } }],
-      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
-    });
-  }
+  if (url.hostname === "mock-ai.invalid") return aiModel.handle(input, init);
   throw new Error(`Unexpected external request: ${request.method} ${request.url}`);
 }
 
@@ -195,11 +112,9 @@ test("existing application APIs persist complete local lifecycle across a backen
       method: "POST",
       body: { content: "Product teams need durable project planning after restarts." },
     });
-    const artifactResult = await api(backend.origin, `/api/projects/${projectId}/idea/artifacts`, {
-      method: "POST",
-      body: { kind: "concept_brief" },
-    });
-    assert.equal(artifactResult.artifact.kind, "concept_brief");
+    const brainstorm = await api(backend.origin, `/api/projects/${projectId}/idea/brainstorm`, { method: "POST" });
+    assert.equal(brainstorm.artifact.kind, "concept_brief");
+    assert.equal(brainstorm.lenses.filter((lens) => lens.status === "completed").length, 7);
 
     const githubResult = await api(backend.origin, `/api/projects/${projectId}/connections`, {
       method: "POST",
@@ -245,8 +160,9 @@ test("existing application APIs persist complete local lifecycle across a backen
     assert.equal(restoredProject.project.code, "PERSIST");
     assert.ok(restoredWorkflow.messages.length >= 3);
     assert.equal(restoredWorkflow.artifacts.length, 1);
-    assert.equal(restoredExecutions.executions.length, 1);
-    assert.equal(restoredExecutions.executions[0].status, "succeeded");
+    assert.equal(restoredExecutions.executions.length, 9);
+    assert.ok(restoredExecutions.executions.every((execution) => execution.status === "succeeded"));
+    assert.equal(restoredWorkflow.egm.brainstorm.length, 1);
     assert.equal(restoredConnections.connections.length, 2);
     assert.ok(restoredSetup.setup.setup_completed_at);
 
@@ -271,14 +187,14 @@ test("existing application APIs persist complete local lifecycle across a backen
 
     const sqlite = new DatabaseSync(databasePath);
     sqlite.exec("PRAGMA foreign_keys = ON");
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 7);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 8);
     assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM projects").get().count, 1);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_sessions").get().count, 1);
     assert.ok(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_messages").get().count >= 3);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_artifacts").get().count, 1);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_executions").get().count, 1);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_execution_attempts").get().count, 1);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_executions").get().count, 9);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_execution_attempts").get().count, 9);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM repository_connections").get().count, 2);
     const credentials = sqlite.prepare("SELECT provider, encrypted_pat, credential_iv FROM repository_connections ORDER BY provider").all();
     assert.equal(credentials.length, 2);
@@ -288,104 +204,6 @@ test("existing application APIs persist complete local lifecycle across a backen
     assert.ok(artifact.content_sha256);
     assert.ok(artifact.prompt_version);
     assert.ok(Array.isArray(JSON.parse(artifact.source_manifest_json)));
-    sqlite.close();
-  } finally {
-    if (backend) await backend.close();
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("Elephant and isolated Goldfish complete, converge, and resume without a repository", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "adis-egm-integration-"));
-  const databasePath = join(directory, "adis.sqlite");
-  const env = {
-    CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString("base64"),
-    AI_API_KEY: "mock-model-key",
-    AI_BASE_URL: "https://mock-ai.invalid/v1",
-    AI_MODEL: "mock-planner",
-    TRUST_USER_HEADER: "true",
-  };
-  let backend;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = externalMock;
-  try {
-    backend = await startLocalBackend({ databasePath, env });
-    const created = await api(backend.origin, "/api/projects", {
-      method: "POST",
-      body: { name: "Independent EGM", code: "EGM", description: "No repository required" },
-    });
-    const projectId = created.project.id;
-
-    await api(backend.origin, `/api/projects/${projectId}/idea`, {
-      method: "PATCH",
-      body: { title: "Durable planning", stage: "workspace" },
-    });
-    assert.deepEqual((await api(backend.origin, `/api/projects/${projectId}/connections`)).connections, []);
-
-    await api(backend.origin, `/api/projects/${projectId}/idea/agent`, { method: "POST" });
-    await api(backend.origin, `/api/projects/${projectId}/idea/start`, { method: "POST" });
-    await api(backend.origin, `/api/projects/${projectId}/idea/messages`, {
-      method: "POST",
-      body: { content: "Product teams need a plan that survives restarts." },
-    });
-    await api(backend.origin, `/api/projects/${projectId}/idea/artifacts`, {
-      method: "POST",
-      body: { kind: "concept_brief" },
-    });
-    const draft = await api(backend.origin, `/api/projects/${projectId}/idea/artifacts`, {
-      method: "POST",
-      body: { kind: "design_draft" },
-    });
-    assert.equal(draft.artifact.content, initialPlan);
-
-    const firstReview = await api(backend.origin, `/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(firstReview.run.round, 1);
-    assert.equal(firstReview.findings.length, 1);
-    await api(backend.origin, `/api/projects/${projectId}/idea/findings/${firstReview.findings[0].id}`, {
-      method: "PATCH",
-      body: { status: "accepted" },
-    });
-    const resolution = await api(backend.origin, `/api/projects/${projectId}/idea/resolve`, { method: "POST" });
-    assert.equal(resolution.applied, 1);
-    assert.equal(resolution.artifact.content, revisedPlan);
-
-    const cleanOne = await api(backend.origin, `/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(cleanOne.run.clean_rounds, 1);
-    assert.equal(cleanOne.run.status, "complete");
-    const converged = await api(backend.origin, `/api/projects/${projectId}/idea/review`, { method: "POST" });
-    assert.equal(converged.run.clean_rounds, 2);
-    assert.equal(converged.run.status, "converged");
-
-    let workflow = await api(backend.origin, `/api/projects/${projectId}/idea/workflow`);
-    assert.ok(workflow.messages.length >= 3);
-    assert.equal(workflow.artifacts.length, 3);
-    assert.equal(workflow.runs.length, 3);
-    assert.equal(workflow.latest_run.status, "converged");
-    assert.ok(Object.keys(workflow.memory).length > 0);
-    assert.deepEqual((await api(backend.origin, `/api/projects/${projectId}/connections`)).connections, []);
-
-    await backend.close();
-    backend = await startLocalBackend({ databasePath, env });
-    workflow = await api(backend.origin, `/api/projects/${projectId}/idea/workflow`);
-    assert.equal(workflow.artifacts.length, 3);
-    assert.equal(workflow.runs.length, 3);
-    assert.equal(workflow.latest_run.status, "converged");
-    assert.equal(workflow.findings.length, 0);
-
-    await backend.close();
-    backend = undefined;
-    const sqlite = new DatabaseSync(databasePath);
-    sqlite.exec("PRAGMA foreign_keys = ON");
-    assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM projects").get().count, 1);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_sessions").get().count, 1);
-    assert.ok(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_messages").get().count >= 3);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_memory").get().count, 1);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_artifacts").get().count, 3);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_review_runs").get().count, 3);
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_findings").get().count, 1);
-    assert.equal(sqlite.prepare("SELECT status FROM idea_findings").get().status, "fixed");
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM repository_connections").get().count, 0);
     sqlite.close();
   } finally {
     if (backend) await backend.close();
@@ -490,6 +308,6 @@ test("databases from earlier builds keep their migration history", async () => {
   sqlite = new DatabaseSync(databasePath);
   const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%migrations'").all().map((row) => row.name);
   assert.deepEqual(tables, ["schema_migrations"]);
-  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 7);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 8);
   sqlite.close();
 });
