@@ -1,45 +1,56 @@
 # ADIS Project Hub
 
-An ADIS/HUB-inspired project onboarding flow with persistent projects and live GitHub and Bitbucket repository checks.
+ADIS has two independent onboarding paths:
 
-## Security and configuration
+- **I Have Code** connects an existing GitHub or Bitbucket repository.
+- **I Am Starting From an Idea** runs the five-stage Elephant–Goldfish workflow: brainstorm, draft, independent review, resolution, and iterative convergence.
 
-Set `CREDENTIAL_ENCRYPTION_KEY` in the hosted Site runtime environment to a base64-encoded 32-byte key (for example, `openssl rand -base64 32`). It is deliberately not generated at startup: changing or losing this key prevents decryption of stored credentials. The application encrypts every GitHub PAT and Bitbucket credential bundle with AES-256-GCM and a fresh 96-bit IV before writing it to D1 (SQLite); plaintext credentials are never returned by an API.
+The application uses one persistent, file-backed SQLite database. The local server reuses the existing API handler and SQL contracts through a thin `node:sqlite` adapter; it is not a parallel backend and has no Cloudflare D1 runtime dependency.
 
-The worker validates GitHub with `GET https://api.github.com/repos/{owner}/{repository}` and Bitbucket with `GET https://api.bitbucket.org/2.0/repositories/{workspace}/{repository}` over HTTPS before creating a connection. It then verifies branch access using the selected provider's official API. Successful responses prove access to that exact repository, including private repositories when the submitted credential permits it. Provider failures are mapped to safe, user-actionable messages. Live success-path verification still needs user-provided valid credentials.
+## Run locally
 
-The numbered files under `migrations/` document the production schema, including the persisted idea conversation, versioned artifacts, isolated review rounds, and finding resolutions in `0005_idea_workflow.sql`. The worker also performs an idempotent bootstrap because this minimal Worker starter has no migration runner; apply the numbered migrations in order when using a platform migration runner.
+Use a stable base64-encoded 32-byte credential key. The server deliberately refuses to start when the key is missing or invalid because silently replacing it would make existing encrypted credentials unreadable.
 
-## Idea workflow AI
-
-The “I’m starting from an idea” workspace implements only five stages: brainstorm, draft, independent review, resolution, and iterative convergence. Configure the server-side `AI_API_KEY` secret (or `OPENAI_API_KEY`). Optional `AI_BASE_URL` and `AI_MODEL` values select an OpenAI-compatible endpoint and model; the defaults are `https://api.openai.com/v1` and `gpt-4.1-mini`. The key is read only by the Worker and is never sent to the browser or stored in D1.
-
-Brainstorm messages, concept briefs, design drafts, review rounds, and finding decisions are persisted in D1. Five isolated review calls examine only the current artifact through Scope, Comprehension, Design, Feasibility, and Readiness lenses. The loop converges after two consecutive clean rounds and stops after five rounds.
-
-Use this starter for a static microsite, click counter, or simple internal UI whose state is browser-scoped. It has no dependencies and needs no install.
-
-Edit `worker/index.js`, then publish through the Sites hosting workflow with this starter's build and validation in `commands`.
-
-The build copies only `worker/index.js` and `.openai/hosting.json`. Do not add standalone asset files. Embed any essential raster bytes in `worker/index.js` and serve or reference them as a data URL.
-
-Pass these argument arrays as `commands`:
-
-```json
-[
-  ["bash", "scripts/build.sh"],
-  ["node", "scripts/validate-artifact.mjs"],
-  ["node", "scripts/audit-workflow.mjs"]
-]
+```bash
+export CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+npm start
 ```
 
-The deterministic build produces:
+The application listens on `http://127.0.0.1:8787` and stores its database at `.data/adis-local.sqlite`. `LOCAL_DB_PATH` and `PORT` override those defaults. Keep the same encryption key across restarts.
 
-```text
-dist/
-├── .openai/
-│   └── hosting.json
-└── server/
-    └── index.js
+Numbered SQL files under `migrations/` are applied transactionally. Migration history remains in the legacy-named `d1_migrations` table for compatibility with databases created by earlier builds; the database itself is standard SQLite. Existing rows and relationships are preserved by the additive migrations.
+
+## Repository connections and credential security
+
+GitHub is validated through `GET https://api.github.com/repos/{owner}/{repository}` and Bitbucket through `GET https://api.bitbucket.org/2.0/repositories/{workspace}/{repository}`. Branch and directory discovery also use each provider's official HTTPS API. A connection is stored only after the submitted credential can access the exact repository.
+
+GitHub PATs and Bitbucket credential bundles are encrypted with AES-256-GCM using a fresh 96-bit IV before they are written to SQLite. The encryption key remains outside the database. Plaintext credentials are not returned by APIs or written to logs, and are decrypted only inside authenticated backend repository operations.
+
+## Elephant–Goldfish workflow
+
+The idea workflow does not require or create a repository connection. Brainstorm messages and durable Elephant memory are persisted in SQLite. Elephant creates a concept brief and complete `plan.md`; five isolated Goldfish reviewers receive only that plan and review it through Scope, Comprehension, Design, Feasibility, and Readiness lenses. Accepted findings are applied by Elephant. Convergence requires two consecutive clean review rounds and stops after five rounds.
+
+Configure model access only when live inference is intentionally authorized:
+
+```bash
+export AI_API_KEY="..."
+# Optional:
+export AI_BASE_URL="https://api.openai.com/v1"
+export AI_MODEL="gpt-4.1-mini"
 ```
 
-`dist/server/index.js` is an ES module with a default export containing `fetch(request, env, ctx)`. Edit `worker/index.js`, not the generated file under `dist/`.
+The model key is server-only and is never stored in SQLite or sent to the browser.
+
+## Verification
+
+```bash
+npm test
+npm run test:integration
+npm run build
+npm run validate
+npm run audit
+```
+
+The integration suite uses real HTTP requests, the production API handlers, all migrations, and a real file-backed SQLite database that is closed and reopened. It verifies persistence, relationships, encrypted credential records, repository onboarding, and the complete Elephant–Goldfish lifecycle.
+
+GitHub, Bitbucket, and model-provider network calls are mocked in the automated suite. Those tests prove local application behavior, not live third-party authentication or paid inference. Live provider success must be reported separately and requires fresh user-authorized credentials.

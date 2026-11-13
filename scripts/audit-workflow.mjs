@@ -9,6 +9,11 @@ assert(source.includes('>Select an option</option>'), 'Products must use the req
 assert(source.includes("services=['Web','Mobile','API','Database','Service']"), 'Products must expose Web, Mobile, API, Database, and Service exactly once');
 assert(source.includes("function dashboardSidebar(active='Home')"), 'The project dashboard must use the reduced project sidebar');
 assert(source.includes('onclick="goHome()"'), 'The reduced sidebar Home action must use connection-aware routing');
+assert(source.includes('onclick="goDiscover()"'), 'The reduced sidebar must expose Discover directly below Home');
+assert(source.includes("active==='Discover'?'active':''"), 'Discover must expose the same active-state styling as the existing sidebar entries');
+assert(source.includes('async function goDiscover()'), 'Dashboard and sidebar navigation must share one Discover entry point');
+assert(source.includes('async function chooseIdea(){return goDiscover()}'), 'The idea dashboard card must route through the shared Discover entry point');
+assert(source.includes("function sideNav(active){return dashboardSidebar(active==='Verify'?'Verify':active==='Operate'?'Operate':'Discover')}"), 'The existing idea pipeline must keep Discover highlighted without duplicating its implementation');
 assert(source.includes("function goHome(){if(!state.connection)"), 'Home must return unverified projects to the initial starting dashboard');
 assert(source.includes("onboarding_stage:'choice'"), 'Home must persist the initial dashboard state for unverified projects');
 assert(source.includes('function toggleSidebar()'), 'The project sidebar must expose a collapse control');

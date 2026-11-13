@@ -5,4 +5,3 @@ site.tar.gz
 !.env.example
 *.sqlite
 *.sqlite-*
-dist/

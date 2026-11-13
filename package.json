@@ -5,6 +5,10 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "validate": "node scripts/validate-artifact.mjs",
-    "audit": "node scripts/audit-workflow.mjs"
+    "audit": "node scripts/audit-workflow.mjs",
+    "start": "node scripts/local-backend.mjs",
+    "dev:backend": "node scripts/local-backend.mjs",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test test/*.integration.test.js"
   }
 }
