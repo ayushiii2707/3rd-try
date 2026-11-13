@@ -72,7 +72,7 @@ function request(env, path, { method = "GET", user = "user-1", body } = {}) {
     method,
     headers: {
       "x-adis-user-id": user,
-      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(method === "GET" ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   }), env);

@@ -164,16 +164,52 @@ export async function resolveCredentialKey({ envValue, keyPath, database }) {
   return { key: created, source: "created" };
 }
 
-async function requestFromNode(req, origin) {
+export const MAX_BODY_BYTES = 1024 * 1024;
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// Only answer requests addressed to an expected host name. This defeats DNS
+// rebinding, where a hostile site points its own domain at 127.0.0.1.
+function allowedHostnames(env) {
+  const extra = String(env.ALLOWED_HOSTS || "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  return new Set([...LOOPBACK_HOSTS, ...extra]);
+}
+
+function requestHost(req, allowed) {
+  const host = String(req.headers.host || "").trim().toLowerCase();
+  let hostname = "";
+  try { hostname = new URL(`http://${host}`).hostname; } catch {}
+  if (!hostname || !allowed.has(hostname)) throw new HttpError(403, "This server only answers requests addressed to an allowed host name.");
+  return host;
+}
+
+async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const body = chunks.length ? Buffer.concat(chunks) : undefined;
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw new HttpError(413, `Request bodies are limited to ${MAX_BODY_BYTES} bytes.`);
+    chunks.push(chunk);
+  }
+  return chunks.length ? Buffer.concat(chunks) : undefined;
+}
+
+async function requestFromNode(req, allowed) {
+  const host = requestHost(req, allowed);
+  const body = await readBody(req);
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
     if (Array.isArray(value)) value.forEach((entry) => headers.append(name, entry));
     else if (value !== undefined) headers.set(name, value);
   }
-  return new Request(new URL(req.url || "/", origin), {
+  // The URL carries the validated Host so the app can compare it with Origin.
+  return new Request(new URL(req.url || "/", `http://${host}`), {
     method: req.method,
     headers,
     body: req.method === "GET" || req.method === "HEAD" ? undefined : body,
@@ -206,16 +242,19 @@ export async function startLocalBackend({
     const credentialKey = await resolveCredentialKey({ envValue: appEnv.CREDENTIAL_ENCRYPTION_KEY, keyPath, database: sqlite });
     appEnv.CREDENTIAL_ENCRYPTION_KEY = credentialKey.key;
     appEnv.DB = new SQLiteDatabaseAdapter(sqlite);
-    let origin;
+    const allowed = allowedHostnames(appEnv);
+    if (!["0.0.0.0", "::", "::1", ...LOOPBACK_HOSTS].includes(host)) allowed.add(host.toLowerCase());
     server = createServer(async (req, res) => {
       try {
-        const response = await app.fetch(await requestFromNode(req, origin), appEnv);
+        const response = await app.fetch(await requestFromNode(req, allowed), appEnv);
         await sendNodeResponse(res, response);
       } catch (error) {
-        console.error("Request failed:", error instanceof Error ? error.message : "unknown error");
-        res.statusCode = 500;
+        const status = error instanceof HttpError ? error.status : 500;
+        if (status === 500) console.error("Request failed:", error instanceof Error ? error.message : "unknown error");
+        res.statusCode = status;
         res.setHeader("content-type", "application/json; charset=utf-8");
-        res.end(JSON.stringify({ error: "Internal server error" }));
+        res.setHeader("connection", "close");
+        res.end(JSON.stringify({ error: status === 500 ? "Internal server error" : error.message }));
       }
     });
     await new Promise((resolveListen, reject) => {
@@ -223,7 +262,7 @@ export async function startLocalBackend({
       server.listen(port, host, resolveListen);
     });
     const address = server.address();
-    origin = `http://${host}:${address.port}`;
+    const origin = `http://${host.includes(":") ? `[${host}]` : host}:${address.port}`;
     return {
       origin,
       databasePath,
@@ -263,6 +302,12 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   if (backend.keySource === "created") console.log(`Created a credential key at ${shown(backend.keyPath)}. Keep it with the database; do not commit it.`);
   else if (backend.keySource === "file") console.log(`Credential key: ${shown(backend.keyPath)}`);
   else console.log("Credential key: CREDENTIAL_ENCRYPTION_KEY environment variable");
+  const listenHost = process.env.HOST || "127.0.0.1";
+  const singleUser = String(process.env.LOCAL_DEMO_MODE ?? "true").toLowerCase() === "true";
+  if (!["127.0.0.1", "localhost", "::1"].includes(listenHost) && singleUser) {
+    console.warn(`WARNING: HOST=${listenHost} makes ADIS reachable from other machines, and single-user mode has no sign-in.`);
+    console.warn("Anyone who can reach this port can use the app. Prefer the default HOST=127.0.0.1.");
+  }
   if (!process.env.AI_API_KEY && !process.env.OPENAI_API_KEY) console.log("AI_API_KEY is not set: repository onboarding works, idea-generation steps will report that AI is not configured.");
   const shutdown = async () => {
     await backend.close();

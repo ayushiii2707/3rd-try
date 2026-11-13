@@ -1,10 +1,3 @@
-export const IDEA_WORKFLOW_STATES = Object.freeze([
-  "session_ready", "agent_verified", "brainstorm_active", "concept_brief_ready",
-  "draft_ready", "review_queued", "review_running", "review_ready_for_resolution",
-  "resolution_active", "revision_ready", "convergence_check",
-  "awaiting_final_approval", "approved", "cancelled",
-]);
-
 export const IDEA_REVIEW_STAGES = Object.freeze([
   "zoom_out", "comprehension", "critic", "intermediate_zoom_out",
   "implementation_readiness", "synthesis",
@@ -27,6 +20,15 @@ const REQUIRED_SCHEMA = Object.freeze({
   idea_artifact_approvals: ["id", "project_id", "artifact_id", "decision", "idempotency_key"],
   idea_workflow_events: ["id", "project_id", "event_type", "actor_type", "idempotency_key"],
 });
+
+// Raised for invalid caller input. Handlers map it to HTTP 400; any other
+// TypeError is a programming error and is reported as a generic 500.
+export class IdeaValidationError extends TypeError {
+  constructor(message) {
+    super(message);
+    this.name = "IdeaValidationError";
+  }
+}
 
 export class IdeaExecutionSchemaError extends Error {
   constructor(inventory) {
@@ -91,13 +93,13 @@ export async function assertIdeaExecutionSchema(db) {
 
 function requireText(value, field, max = 200) {
   const normalized = String(value ?? "").trim();
-  if (!normalized || normalized.length > max) throw new TypeError(`${field} is required and must be at most ${max} characters.`);
+  if (!normalized || normalized.length > max) throw new IdeaValidationError(`${field} is required and must be at most ${max} characters.`);
   return normalized;
 }
 
 function requireSha256(value, field) {
   const normalized = requireText(value, field, 64);
-  if (!/^[a-f0-9]{64}$/i.test(normalized)) throw new TypeError(`${field} must be a SHA-256 digest.`);
+  if (!/^[a-f0-9]{64}$/i.test(normalized)) throw new IdeaValidationError(`${field} must be a SHA-256 digest.`);
   return normalized.toLowerCase();
 }
 
@@ -119,9 +121,9 @@ export async function enqueueIdeaExecution(db, input) {
   const idempotencyKey = requireText(input.idempotencyKey, "idempotencyKey");
   const operation = requireText(input.operation, "operation");
   const agentRole = requireText(input.agentRole, "agentRole");
-  if (!IDEA_EXECUTION_OPERATIONS.includes(operation)) throw new TypeError("Unsupported idea execution operation.");
-  if (!["elephant", "goldfish", "system"].includes(agentRole)) throw new TypeError("Unsupported idea agent role.");
-  if (input.reviewStage && !IDEA_REVIEW_STAGES.includes(input.reviewStage)) throw new TypeError("Unsupported review stage.");
+  if (!IDEA_EXECUTION_OPERATIONS.includes(operation)) throw new IdeaValidationError("Unsupported idea execution operation.");
+  if (!["elephant", "goldfish", "system"].includes(agentRole)) throw new IdeaValidationError("Unsupported idea agent role.");
+  if (input.reviewStage && !IDEA_REVIEW_STAGES.includes(input.reviewStage)) throw new IdeaValidationError("Unsupported review stage.");
   const queuedAt = iso(input.now);
   const executionId = input.id || id();
   const eventId = id();
@@ -293,7 +295,7 @@ export async function persistIdeaArtifactExecution(db, input) {
   const operation = requireText(input.operation, "operation", 50);
   if (![["design_draft", "design_draft"], ["resolve_findings", "design_draft"]]
     .some(([expectedOperation, expectedKind]) => operation === expectedOperation && kind === expectedKind)) {
-    throw new TypeError("Unsupported durable artifact operation.");
+    throw new IdeaValidationError("Unsupported durable artifact operation.");
   }
   const content = requireText(input.content, "content", 200000);
   const title = requireText(input.title, "title", 300);
@@ -336,7 +338,7 @@ export async function persistIdeaReviewStageExecution(db, input) {
   await assertIdeaExecutionSchema(db);
   const stage = requireText(input.stage, "stage");
   const sequence = IDEA_REVIEW_STAGES.indexOf(stage) + 1;
-  if (!sequence) throw new TypeError("Unsupported review stage.");
+  if (!sequence) throw new IdeaValidationError("Unsupported review stage.");
   const at = iso(input.now);
   const resultSha = requireSha256(input.outputSha256, "outputSha256");
   const resultJson = canonicalJson(input.result ?? {});

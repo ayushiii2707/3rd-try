@@ -10,7 +10,6 @@
     "dev": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env --watch-path=worker --watch-path=scripts scripts/local-backend.mjs",
     "build": "bash scripts/build.sh",
     "validate": "node --disable-warning=ExperimentalWarning scripts/validate-artifact.mjs",
-    "audit": "node scripts/audit-workflow.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
     "test:integration": "node --disable-warning=ExperimentalWarning --test test/*.integration.test.js"
   }

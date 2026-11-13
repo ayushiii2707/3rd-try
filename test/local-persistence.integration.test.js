@@ -147,7 +147,7 @@ async function api(origin, path, { method = "GET", body, user = "integration-use
     method,
     headers: {
       "x-adis-user-id": user,
-      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(method === "GET" ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
