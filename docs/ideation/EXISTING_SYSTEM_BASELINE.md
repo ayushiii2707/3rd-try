@@ -1,5 +1,7 @@
 # Existing System Baseline
 
+> **Runtime note (superseded platform details):** This analysis was written when the app was hosted as a Cloudflare-style Worker with a D1 binding. That is no longer the case. The application now runs only on localhost with Node.js (`npm start`) and stores everything in one SQLite file (`.data/adis-local.sqlite`); there is no hosting platform, D1 binding, Wrangler, or cloud account. Read "D1" below as "the SQLite database" and ignore Cloudflare limits, deployment, Time Travel, and Wrangler steps. See README.md.
+
 ## Scope and verification date
 
 This baseline records the local application as inspected on 2026-11-13, before any work for the master Elephant–Goldfish implementation prompt. It separates code that exists from behavior that has actually been proven. No deployment, remote push, database mutation, or paid model call was performed during this audit.

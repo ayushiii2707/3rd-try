@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
+# Syntax-checks every application module. The app runs directly from source
+# on Node.js (npm start); there is no bundle or hosting artifact to produce.
 set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-dist_root="$project_root/dist"
+cd "$project_root"
 
-rm -rf "$dist_root"
-mkdir -p "$dist_root/server" "$dist_root/.openai"
-cp "$project_root/worker/index.js" "$dist_root/server/index.js"
-cp "$project_root/worker/idea-execution.js" "$dist_root/server/idea-execution.js"
-cp "$project_root/.openai/hosting.json" "$dist_root/.openai/hosting.json"
+for file in worker/*.js scripts/*.mjs test/*.js; do
+  node --check "$file"
+done
 
-echo "Built $dist_root"
+echo "Build check passed: all modules parse."

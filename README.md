@@ -3,54 +3,73 @@
 ADIS has two independent onboarding paths:
 
 - **I Have Code** connects an existing GitHub or Bitbucket repository.
-- **I Am Starting From an Idea** runs the five-stage Elephant–Goldfish workflow: brainstorm, draft, independent review, resolution, and iterative convergence.
+- **I Am Starting From an Idea** runs the Elephant–Goldfish workflow: brainstorm, draft, independent review, resolution, and iterative convergence.
 
-The application uses one persistent, file-backed SQLite database. The local server reuses the existing API handler and SQL contracts through a thin `node:sqlite` adapter; it is not a parallel backend and has no Cloudflare D1 runtime dependency.
+The whole application — UI and API — runs on **localhost** with Node.js and stores everything in **one SQLite file**. There is no hosting platform, cloud database, or external account to set up.
 
 ## Run locally
 
-Use a stable base64-encoded 32-byte credential key. The server deliberately refuses to start when the key is missing or invalid because silently replacing it would make existing encrypted credentials unreadable.
+Requirements: Node.js 22.9 or newer (the server uses Node's built-in `node:sqlite`). No `npm install` is needed — there are no dependencies.
 
 ```bash
-export CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 npm start
 ```
 
-The application listens on `http://127.0.0.1:8787` and stores its database at `.data/adis-local.sqlite`. `LOCAL_DB_PATH` and `PORT` override those defaults. Keep the same encryption key across restarts.
+Open <http://localhost:8787>.
 
-Numbered SQL files under `migrations/` are applied transactionally. Migration history remains in the legacy-named `d1_migrations` table for compatibility with databases created by earlier builds; the database itself is standard SQLite. Existing rows and relationships are preserved by the additive migrations.
+That is all. On first start the server:
+
+- creates the SQLite database at `.data/adis-local.sqlite` and applies every migration in `migrations/`;
+- creates a credential encryption key at `.data/credential.key` (file mode 600) and reuses it on every later start.
+
+`.data/` is git-ignored. Keep `credential.key` together with the database: repository credentials stored in that database can only be decrypted with that key. The server never generates a new key for a database that already holds encrypted credentials — it stops with an explanation instead.
+
+`npm run dev` does the same but restarts automatically when files in `worker/` or `scripts/` change.
+
+### Optional settings
+
+Copy `.env.example` to `.env` (git-ignored) or export variables in your shell:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AI_API_KEY` | unset | Model access for the idea workflow. Without it, repository onboarding works and idea-generation steps report that AI is not configured. |
+| `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint. |
+| `AI_MODEL` | `gpt-4.1-mini` | Model name. |
+| `PORT` / `HOST` | `8787` / `127.0.0.1` | Listen address. |
+| `LOCAL_DB_PATH` | `.data/adis-local.sqlite` | SQLite database file. |
+| `CREDENTIAL_ENCRYPTION_KEY` | read from `.data/credential.key` | Only set this to reuse a specific existing key. |
+
+### Users and sign-in
+
+Locally the app runs in single-user mode: every request acts as the local user, so no sign-in is needed. If the server is later placed behind an authenticating reverse proxy, set `LOCAL_DEMO_MODE=false` and `TRUST_USER_HEADER=true`; the proxy must then send the signed-in user's id in the `x-adis-user-id` header. API requests with no user are rejected with `401`. The header is ignored unless `TRUST_USER_HEADER=true`.
+
+## Database
+
+One file-backed SQLite database holds all projects, repository connections, onboarding state, idea sessions, messages, artifacts, reviews, findings, memory, and execution records. Numbered SQL files under `migrations/` are applied in order inside transactions and recorded in the `schema_migrations` table. A database created by an earlier build (which used a `d1_migrations` table) is upgraded in place with its history and data preserved.
+
+To inspect it: `sqlite3 .data/adis-local.sqlite` (stop the server first, or open read-only).
 
 ## Repository connections and credential security
 
 GitHub is validated through `GET https://api.github.com/repos/{owner}/{repository}` and Bitbucket through `GET https://api.bitbucket.org/2.0/repositories/{workspace}/{repository}`. Branch and directory discovery also use each provider's official HTTPS API. A connection is stored only after the submitted credential can access the exact repository.
 
-GitHub PATs and Bitbucket credential bundles are encrypted with AES-256-GCM using a fresh 96-bit IV before they are written to SQLite. The encryption key remains outside the database. Plaintext credentials are not returned by APIs or written to logs, and are decrypted only inside authenticated backend repository operations.
+GitHub PATs and Bitbucket credential bundles are encrypted with AES-256-GCM using a fresh 96-bit IV before they are written to SQLite. The encryption key is kept outside the database. Plaintext credentials are not returned by APIs or written to logs, and are decrypted only inside backend repository operations.
 
 ## Elephant–Goldfish workflow
 
-The idea workflow does not require or create a repository connection. Brainstorm messages and durable Elephant memory are persisted in SQLite. Elephant creates a concept brief and complete `plan.md`; five isolated Goldfish reviewers receive only that plan and review it through Scope, Comprehension, Design, Feasibility, and Readiness lenses. Accepted findings are applied by Elephant. Convergence requires two consecutive clean review rounds and stops after five rounds.
+The idea workflow does not require or create a repository connection. Brainstorm messages and Elephant memory are persisted in SQLite. Elephant creates a concept brief (through the durable execution lifecycle) and a `plan.md`; Goldfish reviewers receive only that plan. Accepted findings are applied by Elephant. Convergence requires two consecutive clean review rounds and stops after five rounds.
 
-Configure model access only when live inference is intentionally authorized:
-
-```bash
-export AI_API_KEY="..."
-# Optional:
-export AI_BASE_URL="https://api.openai.com/v1"
-export AI_MODEL="gpt-4.1-mini"
-```
+Current status: only concept-brief generation runs through the durable queue/claim/retry lifecycle. The ordered six-stage Goldfish review, formal approval gates, and context-isolation proof are still being implemented — see `CODEX_HANDOFF_CONTEXT.md`.
 
 The model key is server-only and is never stored in SQLite or sent to the browser.
 
 ## Verification
 
 ```bash
-npm test
-npm run test:integration
-npm run build
-npm run validate
-npm run audit
+npm test               # unit + integration tests (real HTTP server, real SQLite file)
+npm run build          # syntax-checks every module
+npm run validate       # boots the app on a temporary SQLite file and checks UI + API
+npm run audit          # source-level workflow checks
 ```
 
-The integration suite uses real HTTP requests, the production API handlers, all migrations, and a real file-backed SQLite database that is closed and reopened. It verifies persistence, relationships, encrypted credential records, repository onboarding, and the complete Elephant–Goldfish lifecycle.
-
-GitHub, Bitbucket, and model-provider network calls are mocked in the automated suite. Those tests prove local application behavior, not live third-party authentication or paid inference. Live provider success must be reported separately and requires fresh user-authorized credentials.
+GitHub, Bitbucket, and model-provider network calls are mocked in the automated suite. Those tests prove local application behavior, not live third-party authentication or paid inference.

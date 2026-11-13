@@ -1,5 +1,7 @@
 # Controlled Implementation Plan
 
+> **Runtime note (superseded platform details):** This analysis was written when the app was hosted as a Cloudflare-style Worker with a D1 binding. That is no longer the case. The application now runs only on localhost with Node.js (`npm start`) and stores everything in one SQLite file (`.data/adis-local.sqlite`); there is no hosting platform, D1 binding, Wrangler, or cloud account. Read "D1" below as "the SQLite database" and ignore Cloudflare limits, deployment, Time Travel, and Wrangler steps. See README.md.
+
 ## Operating rules
 
 - Do not deploy or push during this work unless separately requested.

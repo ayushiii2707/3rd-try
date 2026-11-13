@@ -18,13 +18,13 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-class D1Statement {
+class SQLiteStatement {
   constructor(database, sql, bindings = []) {
     this.database = database;
     this.sql = sql;
     this.bindings = bindings;
   }
-  bind(...bindings) { return new D1Statement(this.database, this.sql, bindings); }
+  bind(...bindings) { return new SQLiteStatement(this.database, this.sql, bindings); }
   first() { return this.database.prepare(this.sql).get(...this.bindings) ?? null; }
   all() { return { results: this.database.prepare(this.sql).all(...this.bindings) }; }
   run() {
@@ -33,9 +33,9 @@ class D1Statement {
   }
 }
 
-class D1Database {
+class SQLiteDatabase {
   constructor(database) { this.database = database; }
-  prepare(sql) { return new D1Statement(this.database, sql); }
+  prepare(sql) { return new SQLiteStatement(this.database, sql); }
   batch(statements) {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -66,7 +66,7 @@ async function database({ through = 7 } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys = ON");
   for (let number = 1; number <= through; number += 1) sqlite.exec(await migration(number));
-  return { sqlite, db: new D1Database(sqlite) };
+  return { sqlite, db: new SQLiteDatabase(sqlite) };
 }
 
 function seedProject(sqlite) {

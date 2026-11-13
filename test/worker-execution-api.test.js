@@ -18,13 +18,13 @@ const migrationNames = [
   "0007_idea_execution_foundation.sql",
 ];
 
-class D1Statement {
+class SQLiteStatement {
   constructor(database, sql, bindings = []) {
     this.database = database;
     this.sql = sql;
     this.bindings = bindings;
   }
-  bind(...bindings) { return new D1Statement(this.database, this.sql, bindings); }
+  bind(...bindings) { return new SQLiteStatement(this.database, this.sql, bindings); }
   first() { return this.database.prepare(this.sql).get(...this.bindings) ?? null; }
   all() { return { results: this.database.prepare(this.sql).all(...this.bindings) }; }
   run() {
@@ -33,9 +33,9 @@ class D1Statement {
   }
 }
 
-class D1Database {
+class SQLiteDatabase {
   constructor(database) { this.database = database; }
-  prepare(sql) { return new D1Statement(this.database, sql); }
+  prepare(sql) { return new SQLiteStatement(this.database, sql); }
   batch(statements) {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -64,14 +64,14 @@ async function database(through) {
     .run("message-1", "project-1", "user", "Build a reliable planning pipeline.", at);
   sqlite.prepare("INSERT INTO idea_memory (project_id, memory_json, updated_at) VALUES (?, '{}', ?)")
     .run("project-1", at);
-  return { sqlite, env: { DB: new D1Database(sqlite), AI_MODEL: "test-model" } };
+  return { sqlite, env: { DB: new SQLiteDatabase(sqlite), AI_MODEL: "test-model", TRUST_USER_HEADER: "true" } };
 }
 
 function request(env, path, { method = "GET", user = "user-1", body } = {}) {
   return worker.fetch(new Request(`https://local.test${path}`, {
     method,
     headers: {
-      "oai-authenticated-user-id": user,
+      "x-adis-user-id": user,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -97,7 +97,7 @@ Concept brief generation and persistence.
 Ordered Goldfish review.
 
 # Constraints
-Use the existing Worker and D1 database.
+Use the existing server and SQLite database.
 
 # Assumptions
 Use an idempotent execution lifecycle.

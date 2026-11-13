@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -21,7 +21,7 @@ Product teams using ADIS.
 Durable, traceable planning records.
 
 # In scope
-The local Worker and its existing APIs.
+The local server and its existing APIs.
 
 # Out of scope
 Production deployment.
@@ -30,7 +30,7 @@ Production deployment.
 No paid or live provider calls.
 
 # Assumptions
-SQLite faithfully adapts the D1 API used here.
+SQLite persists every record used here.
 
 # Risks
 Production schema drift still requires read-only inspection.
@@ -114,9 +114,9 @@ async function externalMock(input, init = {}) {
     });
     else if (prompt.includes("Ask one concise")) content = JSON.stringify({
       reply: "The concept is ready for a brief.",
-      hypothesis: "A persistent Worker lifecycle addresses the need.",
+      hypothesis: "A persistent server lifecycle addresses the need.",
       ready: true,
-      memory: { known_facts: ["Product teams are primary users"], assumptions: [], constraints: ["No production changes"], decisions: ["Use the existing Worker"], open_questions: [] },
+      memory: { known_facts: ["Product teams are primary users"], assumptions: [], constraints: ["No production changes"], decisions: ["Use the existing server"], open_questions: [] },
     });
     else if (prompt.includes("Create the complete plan.md")) content = initialPlan;
     else if (prompt.includes("PLAN.MD ONLY:")) {
@@ -146,7 +146,7 @@ async function api(origin, path, { method = "GET", body, user = "integration-use
   const response = await nativeFetch(`${origin}${path}`, {
     method,
     headers: {
-      "oai-authenticated-user-id": user,
+      "x-adis-user-id": user,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -164,6 +164,7 @@ test("existing application APIs persist complete local lifecycle across a backen
     AI_API_KEY: "mock-model-key",
     AI_BASE_URL: "https://mock-ai.invalid/v1",
     AI_MODEL: "mock-planner",
+    TRUST_USER_HEADER: "true",
   };
   let backend;
   const originalFetch = globalThis.fetch;
@@ -262,7 +263,7 @@ test("existing application APIs persist complete local lifecycle across a backen
 
     const otherUserProjects = await api(backend.origin, "/api/projects", { user: "other-user" });
     assert.deepEqual(otherUserProjects.projects, []);
-    const unauthorized = await nativeFetch(`${backend.origin}/api/projects/${projectId}`, { headers: { "oai-authenticated-user-id": "other-user" } });
+    const unauthorized = await nativeFetch(`${backend.origin}/api/projects/${projectId}`, { headers: { "x-adis-user-id": "other-user" } });
     assert.equal(unauthorized.status, 404);
 
     await backend.close();
@@ -270,7 +271,7 @@ test("existing application APIs persist complete local lifecycle across a backen
 
     const sqlite = new DatabaseSync(databasePath);
     sqlite.exec("PRAGMA foreign_keys = ON");
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM d1_migrations").get().count, 7);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 7);
     assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM projects").get().count, 1);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_sessions").get().count, 1);
@@ -302,6 +303,7 @@ test("Elephant and isolated Goldfish complete, converge, and resume without a re
     AI_API_KEY: "mock-model-key",
     AI_BASE_URL: "https://mock-ai.invalid/v1",
     AI_MODEL: "mock-planner",
+    TRUST_USER_HEADER: "true",
   };
   let backend;
   const originalFetch = globalThis.fetch;
@@ -391,14 +393,103 @@ test("Elephant and isolated Goldfish complete, converge, and resume without a re
   }
 });
 
-test("local runtime refuses to open a database without the existing encryption key contract", async () => {
+test("a fresh checkout starts on localhost with no configuration and keeps one stable key", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "adis-fresh-integration-"));
+  const databasePath = join(directory, "adis.sqlite");
+  const keyPath = join(directory, "credential.key");
+  const freshEnv = { CREDENTIAL_ENCRYPTION_KEY: "", CREDENTIAL_KEY_FILE: "", TRUST_USER_HEADER: "" };
+  let backend = await startLocalBackend({ databasePath, env: freshEnv });
+  try {
+    assert.equal(backend.keySource, "created");
+    assert.equal(backend.keyPath, keyPath);
+    assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
+    const createdKey = (await readFile(keyPath, "utf8")).trim();
+    assert.equal(Buffer.from(createdKey, "base64").length, 32);
+
+    // No identity header at all: the local server runs in single-user mode.
+    const page = await nativeFetch(`${backend.origin}/`);
+    assert.equal(page.status, 200);
+    const created = await nativeFetch(`${backend.origin}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Fresh clone", code: "FRESH" }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const listed = await (await nativeFetch(`${backend.origin}/api/projects`)).json();
+    assert.deepEqual(listed.projects.map((project) => project.code), ["FRESH"]);
+
+    // Without TRUST_USER_HEADER a client-supplied identity header is ignored.
+    const spoofed = await (await nativeFetch(`${backend.origin}/api/projects`, { headers: { "x-adis-user-id": "someone-else" } })).json();
+    assert.deepEqual(spoofed.projects.map((project) => project.code), ["FRESH"]);
+
+    await backend.close();
+    backend = await startLocalBackend({ databasePath, env: freshEnv });
+    assert.equal(backend.keySource, "file");
+    assert.equal((await readFile(keyPath, "utf8")).trim(), createdKey);
+    const afterRestart = await (await nativeFetch(`${backend.origin}/api/projects`)).json();
+    assert.deepEqual(afterRestart.projects.map((project) => project.code), ["FRESH"]);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("API requests without an identity are rejected outside local single-user mode", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "adis-auth-integration-"));
+  const backend = await startLocalBackend({
+    databasePath: join(directory, "adis.sqlite"),
+    env: { CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 3).toString("base64"), LOCAL_DEMO_MODE: "false", TRUST_USER_HEADER: "" },
+  });
+  try {
+    assert.equal((await nativeFetch(`${backend.origin}/api/projects`)).status, 401);
+    const create = await nativeFetch(`${backend.origin}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-adis-user-id": "untrusted" },
+      body: JSON.stringify({ name: "Nope", code: "NOPE" }),
+    });
+    assert.equal(create.status, 401);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("the runtime never replaces the key of a database that holds encrypted credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "adis-key-integration-"));
+  const databasePath = join(directory, "adis.sqlite");
+  const backend = await startLocalBackend({ databasePath, env: { CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 5).toString("base64") } });
+  await backend.close();
+  const sqlite = new DatabaseSync(databasePath);
+  const at = new Date().toISOString();
+  sqlite.prepare("INSERT INTO projects (id, user_id, name, code, description, created_at, updated_at) VALUES ('p1', 'u1', 'P', 'P', '', ?, ?)").run(at, at);
+  sqlite.prepare(`INSERT INTO repository_connections (id, project_id, provider, owner, repository, repository_id, repository_url, permissions_json, status, encrypted_pat, credential_iv, connected_at, updated_at)
+    VALUES ('c1', 'p1', 'github', 'o', 'r', '1', 'https://github.com/o/r', '{}', 'connected', 'ciphertext', 'iv', ?, ?)`).run(at, at);
+  sqlite.close();
+
   await assert.rejects(
-    startLocalBackend({ databasePath: join(directory, "missing.sqlite"), env: { CREDENTIAL_ENCRYPTION_KEY: "" } }),
-    /CREDENTIAL_ENCRYPTION_KEY is required/,
+    startLocalBackend({ databasePath, env: { CREDENTIAL_ENCRYPTION_KEY: "", CREDENTIAL_KEY_FILE: "" } }),
+    /already contains encrypted repository credentials/,
   );
+  await assert.rejects(stat(join(directory, "credential.key")), { code: "ENOENT" });
   await assert.rejects(
-    startLocalBackend({ databasePath: join(directory, "invalid.sqlite"), env: { CREDENTIAL_ENCRYPTION_KEY: "not-base64" } }),
+    startLocalBackend({ databasePath, env: { CREDENTIAL_ENCRYPTION_KEY: "not-base64" } }),
     /valid base64-encoded 32-byte key/,
   );
+});
+
+test("databases from earlier builds keep their migration history", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "adis-legacy-integration-"));
+  const databasePath = join(directory, "adis.sqlite");
+  const env = { CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 4).toString("base64") };
+  let backend = await startLocalBackend({ databasePath, env });
+  await backend.close();
+  let sqlite = new DatabaseSync(databasePath);
+  sqlite.exec("ALTER TABLE schema_migrations RENAME TO d1_migrations");
+  sqlite.close();
+
+  backend = await startLocalBackend({ databasePath, env });
+  await backend.close();
+  sqlite = new DatabaseSync(databasePath);
+  const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%migrations'").all().map((row) => row.name);
+  assert.deepEqual(tables, ["schema_migrations"]);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 7);
+  sqlite.close();
 });

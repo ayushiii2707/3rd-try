@@ -53,4 +53,4 @@ assert(!source.includes('Not started'), 'The implemented idea stages must not di
 const safeConnection = source.match(/function safeConnection\(row\)\{([^}]]+)\}/)?.[1] || '';
 assert(!safeConnection.includes('encrypted_pat') && !safeConnection.includes('credential_iv'), 'Safe connection responses must not expose stored credentials');
 
-console.log('Workflow audit passed: onboarding, providers, credential safeguards, and the five-stage idea workflow are present.');
+console.log('Workflow audit passed: onboarding, providers, credential safeguards, and the Elephant–Goldfish idea workflow are present.');
