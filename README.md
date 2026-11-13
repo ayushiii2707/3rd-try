@@ -13,7 +13,7 @@ The whole application — UI and API — runs on **localhost** with Node.js and 
 | --- | --- |
 | `main` (default) | The complete, current application. Start here. |
 | `egm` | Isolated Elephant–Goldfish pipeline development, kept in sync with `main`. |
-| `external-sources`, `elephant-goldfish-pipeline` | Earlier snapshots, now kept identical to `main` so existing clones update with `git pull`. |
+| `external-sources` | Former default branch, kept identical to `main` so existing clones update with `git pull`. Switch to `main`. |
 
 Earlier local-only history is preserved in the tags `archive/hosted-site-main` and `archive/codex-idea-workflow`.
 
